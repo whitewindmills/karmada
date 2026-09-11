@@ -24,6 +24,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/karmada-io/karmada/pkg/util"
@@ -45,6 +46,18 @@ func getAllDefaultRetentionInterpreter() map[schema.GroupVersionKind]retentionIn
 	s[batchv1.SchemeGroupVersion.WithKind(util.JobKind)] = retainJobSelectorFields
 	s[corev1.SchemeGroupVersion.WithKind(util.SecretKind)] = retainSecretServiceAccountToken
 	return s
+}
+
+func toRetainedUnstructured(desired *unstructured.Unstructured, retained runtime.Object) (*unstructured.Unstructured, error) {
+	object, err := helper.ToUnstructured(retained)
+	if err != nil {
+		return nil, err
+	}
+	// Typed conversion must not recreate status that was pruned before dispatch.
+	if _, exists := desired.Object["status"]; !exists {
+		unstructured.RemoveNestedField(object.Object, "status")
+	}
+	return object, nil
 }
 
 func retainServiceFields(desired, observed *unstructured.Unstructured) (*unstructured.Unstructured, error) {
@@ -73,7 +86,7 @@ func retainServiceFields(desired, observed *unstructured.Unstructured) (*unstruc
 			}
 		}
 	}
-	return helper.ToUnstructured(desiredService)
+	return toRetainedUnstructured(desired, desiredService)
 }
 
 func retainPodFields(desired, observed *unstructured.Unstructured) (*unstructured.Unstructured, error) {
@@ -111,7 +124,7 @@ func retainPodFields(desired, observed *unstructured.Unstructured) (*unstructure
 			}
 		}
 	}
-	unstructuredObj, err := helper.ToUnstructured(desiredPod)
+	unstructuredObj, err := toRetainedUnstructured(desired, desiredPod)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform Pod: %v", err)
 	}

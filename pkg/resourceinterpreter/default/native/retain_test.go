@@ -20,16 +20,56 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
 
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/helper"
 )
+
+func TestTypedRetentionPreservesStatusPresence(t *testing.T) {
+	for _, object := range []runtime.Object{
+		&corev1.Pod{
+			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+			Spec:     corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "image"}}},
+			Status:   corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		&corev1.Service{
+			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+			Spec: corev1.ServiceSpec{
+				Type: corev1.ServiceTypeNodePort, ClusterIP: "10.0.0.1",
+				Ports: []corev1.ServicePort{{Name: "http", Port: 80, NodePort: 30080}},
+			},
+			Status: corev1.ServiceStatus{LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{{IP: "192.0.2.1"}},
+			}},
+		},
+	} {
+		t.Run(object.GetObjectKind().GroupVersionKind().Kind, func(t *testing.T) {
+			observed, err := helper.ToUnstructured(object)
+			require.NoError(t, err)
+			for _, withStatus := range []bool{false, true} {
+				desired := observed.DeepCopy()
+				if !withStatus {
+					unstructured.RemoveNestedField(desired.Object, "status")
+				}
+				retained, err := NewDefaultInterpreter().Retain(desired, observed)
+				require.NoError(t, err)
+				status, exists := retained.Object["status"]
+				assert.Equal(t, withStatus, exists)
+				if withStatus {
+					assert.Equal(t, desired.Object["status"], status)
+				}
+			}
+		})
+	}
+}
 
 func Test_retainK8sWorkloadReplicas(t *testing.T) {
 	desiredNum, observedNum := int32(2), int32(4)

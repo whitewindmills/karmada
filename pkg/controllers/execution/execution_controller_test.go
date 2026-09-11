@@ -53,6 +53,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/events"
 	"github.com/karmada-io/karmada/pkg/resourceinterpreter"
 	"github.com/karmada-io/karmada/pkg/resourceinterpreter/default/native"
+	"github.com/karmada-io/karmada/pkg/resourceinterpreter/default/native/prune"
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/fedinformer"
 	"github.com/karmada-io/karmada/pkg/util/fedinformer/genericmanager"
@@ -716,6 +717,33 @@ func TestController_getEventHandlerIsMemoized(t *testing.T) {
 	second := c.getEventHandler()
 	assert.NotNil(t, first)
 	assert.Same(t, first, second, "getEventHandler should return the same handler instance across calls")
+}
+
+func TestPodRetentionDoesNotForceUnchangedUpdates(t *testing.T) {
+	controller := newController(newWork(nil), record.NewFakeRecorder(1))
+	t.Cleanup(func() { controller.InformerManager.Stop(clusterName) })
+	memberClient := controller.InformerManager.GetSingleClusterManager(clusterName).GetClient().(*dynamicfake.FakeDynamicClient)
+	resourceClient := memberClient.Resource(corev1.SchemeGroupVersion.WithResource("pods")).Namespace(podNamespace)
+	observed, err := resourceClient.Get(t.Context(), podName, metav1.GetOptions{})
+	require.NoError(t, err)
+	desired := observed.DeepCopy()
+	require.NoError(t, prune.RemoveIrrelevantFields(desired))
+	memberClient.ClearActions()
+	result, err := controller.ObjectWatcher.Update(t.Context(), clusterName, desired, observed)
+	require.NoError(t, err)
+	assert.Equal(t, objectwatcher.OperationResultNone, result)
+	for _, action := range memberClient.Actions() {
+		assert.NotEqual(t, "update", action.GetVerb(), "unchanged Pods must not issue member API writes")
+	}
+	_, recorded := controller.ObjectWatcher.GetVersionRecord(clusterName, observed)
+	assert.True(t, recorded, "a no-op must still record the observed resource version")
+
+	util.MergeLabel(desired, "example.com/change", "required")
+	_, err = controller.ObjectWatcher.Update(t.Context(), clusterName, desired, observed)
+	require.NoError(t, err)
+	updated, err := resourceClient.Get(t.Context(), podName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "required", updated.GetLabels()["example.com/change"], "real changes must still reach the member")
 }
 
 // stubObjectWatcher implements objectwatcher.ObjectWatcher for testing.
