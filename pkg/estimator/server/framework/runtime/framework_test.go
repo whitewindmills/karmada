@@ -24,6 +24,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/karmada-io/karmada/pkg/estimator/pb"
 	"github.com/karmada-io/karmada/pkg/estimator/server/framework"
@@ -60,6 +62,40 @@ func (pl *TestPlugin) Estimate(_ context.Context, _ framework.ReplicaEstimationC
 
 func (pl *TestPlugin) EstimateComponents(_ context.Context, _ framework.ComponentEstimationContext) (int32, *framework.Result) {
 	return pl.inj.estimateComponentsResult.sets, pl.inj.estimateComponentsResult.ret
+}
+
+func TestNewFrameworkOptions(t *testing.T) {
+	clientSet := fake.NewClientset()
+	informerFactory := informers.NewSharedInformerFactory(clientSet, 0)
+	checkHandle := func(h framework.Handle) {
+		t.Helper()
+		if h.ClientSet() != clientSet {
+			t.Error("configured clientset was not passed to the framework handle")
+		}
+		if h.SharedInformerFactory() != informerFactory {
+			t.Error("configured informer factory was not passed to the framework handle")
+		}
+		if got := h.Parallelism(); got != 3 {
+			t.Errorf("configured parallelism = %d, want 3", got)
+		}
+	}
+	factoryCalled := false
+	registry := Registry{
+		"options": func(h framework.Handle) (framework.Plugin, error) {
+			factoryCalled = true
+			checkHandle(h)
+			return &TestPlugin{name: "options"}, nil
+		},
+	}
+	f, err := NewFramework(registry,
+		WithClientSet(clientSet),
+		WithInformerFactory(informerFactory),
+		WithParallelism(2),
+		WithParallelism(3),
+	)
+	require.NoError(t, err)
+	require.True(t, factoryCalled)
+	checkHandle(f)
 }
 
 func Test_frameworkImpl_RunEstimateReplicasPlugins(t *testing.T) {

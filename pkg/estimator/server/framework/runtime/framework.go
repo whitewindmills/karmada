@@ -95,7 +95,9 @@ func NewFramework(r Registry, opts ...Option) (framework.Framework, error) {
 		opt(&options)
 	}
 	f := &frameworkImpl{
+		clientSet:       options.clientSet,
 		informerFactory: options.informerFactory,
+		parallelism:     options.parallelism,
 	}
 	estimateReplicasPluginsList := reflect.ValueOf(&f.estimateReplicasPlugins).Elem()
 	estimateReplicasType := estimateReplicasPluginsList.Type().Elem()
