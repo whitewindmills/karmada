@@ -17,11 +17,18 @@ limitations under the License.
 package utils
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 func stringInslice(target string, strArray []string) bool {
@@ -122,13 +129,50 @@ func TestFlagsDNS(t *testing.T) {
 	}
 }
 
+type internetIPTestTransport func(*http.Request) (*http.Response, error)
+
+func (transport internetIPTestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
 func TestInternetIP(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = internetIPTestTransport(func(request *http.Request) (*http.Response, error) {
+		deadline, ok := request.Context().Deadline()
+		if !ok {
+			t.Error("public IP lookup has no request deadline")
+		} else if remaining := time.Until(deadline); remaining <= 0 || remaining > 5*time.Second {
+			t.Errorf("public IP lookup deadline remaining = %v, want (0, 5s]", remaining)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("203.0.113.42")),
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 	got, err := InternetIP()
-	if got == nil {
-		t.Errorf("InternetIP() want return not nil, but return nil")
+	if err != nil || !got.Equal(net.ParseIP("203.0.113.42")) {
+		t.Errorf("InternetIP() = (%v, %v), want the supplied public IP", got, err)
 	}
-	if err != nil {
-		t.Errorf("InternetIP() want return not error, but return error")
+}
+
+func TestInternetIPBodyReadIsBounded(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = internetIPTestTransport(func(request *http.Request) (*http.Response, error) {
+		if _, ok := request.Context().Deadline(); !ok {
+			return nil, fmt.Errorf("public IP request has no deadline")
+		}
+		reader, writer := io.Pipe()
+		go func() {
+			<-request.Context().Done()
+			_ = writer.CloseWithError(request.Context().Err())
+		}()
+		return &http.Response{StatusCode: http.StatusOK, Body: reader}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	got, err := InternetIP()
+	if got != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("InternetIP() = (%v, %v), want a deadline error while reading the body", got, err)
 	}
 }
 

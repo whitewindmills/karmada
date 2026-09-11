@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
@@ -65,9 +66,10 @@ func FlagsDNS(dns string) []string {
 	return strings.Split(dns, separator)
 }
 
-// InternetIP Current host Internet IP.
+// InternetIP retrieves the current host's Internet IP with a bounded request.
 func InternetIP() (net.IP, error) {
-	resp, err := http.Get(getInternetIPUrl)
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(getInternetIPUrl)
 	if err != nil {
 		return nil, err
 	}

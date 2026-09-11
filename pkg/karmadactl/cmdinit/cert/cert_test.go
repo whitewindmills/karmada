@@ -55,9 +55,9 @@ func (r rejectCertificateTestNetwork) RoundTrip(request *http.Request) (*http.Re
 }
 
 func TestGenCerts(t *testing.T) {
-	originalClient := http.DefaultClient
-	http.DefaultClient = &http.Client{Transport: rejectCertificateTestNetwork{t: t}}
-	t.Cleanup(func() { http.DefaultClient = originalClient })
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = rejectCertificateTestNetwork{t: t}
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 	certsDir := t.TempDir()
 	certsWithCADir := t.TempDir()
 	caCertPath := filepath.Join(certsDir, "ca.crt")
