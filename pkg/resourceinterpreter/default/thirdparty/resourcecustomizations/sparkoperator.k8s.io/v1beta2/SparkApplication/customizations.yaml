@@ -178,7 +178,7 @@ spec:
             resourceRequest = {}
           }
 
-          local drv_cpu    = get(observedObj, {"spec","driver","cores"}) or 1
+          local drv_cpu    = get(observedObj, {"spec","driver","coreRequest"}) or get(observedObj, {"spec","driver","cores"}) or 1
           local drv_memory_str = get(observedObj, {"spec", "driver", "memory"}) or "1g"
           local drv_overhead_str = get(observedObj, {"spec", "driver", "memoryOverhead"})
           drv_requires.resourceRequest.cpu    = drv_cpu
@@ -220,7 +220,7 @@ spec:
             resourceRequest = {}
           }
 
-          local exe_cpu    = get(observedObj, {"spec","executor","cores"}) or 1
+          local exe_cpu    = get(observedObj, {"spec","executor","coreRequest"}) or get(observedObj, {"spec","executor","cores"}) or 1
           local exe_memory_str = get(observedObj, {"spec", "executor", "memory"}) or "1g"
           local exe_overhead_str = get(observedObj, {"spec", "executor", "memoryOverhead"})
           exe_requires.resourceRequest.cpu    = exe_cpu

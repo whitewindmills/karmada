@@ -1,0 +1,64 @@
+name: "Spark physical CPU requests override execution core counts"
+description: "coreRequest controls Kubernetes CPU requests; cores and coreLimit must not replace it"
+observedObj:
+  apiVersion: sparkoperator.k8s.io/v1beta2
+  kind: SparkApplication
+  metadata:
+    name: spark-cpu-requests
+    namespace: default
+  spec:
+    type: Java
+    driver:
+      cores: 4
+      coreRequest: "250m"
+      coreLimit: "8"
+    executor:
+      cores: 8
+      coreRequest: "1500m"
+      coreLimit: "16"
+      instances: 3
+operation: InterpretComponent
+output:
+  components:
+    - name: driver
+      replicas: 1
+      replicaRequirements:
+        resourceRequest:
+          cpu: "250m"
+          memory: "1408Mi"
+    - name: executor
+      replicas: 3
+      replicaRequirements:
+        resourceRequest:
+          cpu: "1500m"
+          memory: "1408Mi"
+---
+name: "Spark explicit CPU requests override default core counts"
+description: "Fractional coreRequest values are honored when cores is omitted"
+observedObj:
+  apiVersion: sparkoperator.k8s.io/v1beta2
+  kind: SparkApplication
+  metadata:
+    name: spark-cpu-defaults
+    namespace: default
+  spec:
+    type: Java
+    driver:
+      coreRequest: "0.25"
+    executor:
+      coreRequest: "125m"
+operation: InterpretComponent
+output:
+  components:
+    - name: driver
+      replicas: 1
+      replicaRequirements:
+        resourceRequest:
+          cpu: "250m"
+          memory: "1408Mi"
+    - name: executor
+      replicas: 1
+      replicaRequirements:
+        resourceRequest:
+          cpu: "125m"
+          memory: "1408Mi"
