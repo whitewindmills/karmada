@@ -17,6 +17,7 @@ limitations under the License.
 package native
 
 import (
+	"cmp"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -66,7 +67,7 @@ func retainServiceFields(desired, observed *unstructured.Unstructured) (*unstruc
 			continue
 		}
 		for _, observedPort := range observedService.Spec.Ports {
-			if port.Name == observedPort.Name && port.Protocol == observedPort.Protocol {
+			if port.Name == observedPort.Name && cmp.Or(port.Protocol, corev1.ProtocolTCP) == cmp.Or(observedPort.Protocol, corev1.ProtocolTCP) {
 				port.NodePort = observedPort.NodePort
 				break
 			}

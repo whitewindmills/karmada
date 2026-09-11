@@ -89,6 +89,11 @@ func TestRetainServiceNodePorts(t *testing.T) {
 			want:  []int32{31675},
 		},
 		{
+			name: "omitted protocol uses the TCP default", serviceType: corev1.ServiceTypeNodePort,
+			ports: []corev1.ServicePort{{Name: "http", Port: 80}},
+			want:  []int32{31675},
+		},
+		{
 			name: "explicit override wins", serviceType: corev1.ServiceTypeNodePort,
 			ports: []corev1.ServicePort{{Name: "http", Protocol: corev1.ProtocolTCP, Port: 80, NodePort: 32080}},
 			want:  []int32{32080},
