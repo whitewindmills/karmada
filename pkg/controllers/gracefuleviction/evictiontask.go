@@ -142,7 +142,8 @@ func nextRetry(tasks []workv1alpha2.GracefulEvictionTask, gracefulTimeout time.D
 
 	// When there are only tasks whose type is SuppressDeletion, we do not need to retry.
 	if retryInterval == time.Duration(math.MaxInt64) {
-		retryInterval = 0
+		return 0
 	}
-	return retryInterval
+	// A deadline can pass after assessment; RequeueAfter ignores non-positive durations.
+	return max(retryInterval, time.Nanosecond)
 }

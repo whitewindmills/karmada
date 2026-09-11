@@ -622,6 +622,40 @@ func Test_nextRetry(t *testing.T) {
 			},
 			want: time.Minute * 5, // 10 minutes (grace period) - 5 minutes (elapsed time)
 		},
+		{
+			name: "deadline reached after assessment",
+			args: args{
+				task: []workv1alpha2.GracefulEvictionTask{{
+					CreationTimestamp: &metav1.Time{Time: timeNow.Add(-timeout)},
+				}},
+				timeout: timeout,
+				timeNow: timeNow.Time,
+			},
+			want: time.Nanosecond,
+		},
+		{
+			name: "deadline expired after assessment",
+			args: args{
+				task: []workv1alpha2.GracefulEvictionTask{{
+					CreationTimestamp: &metav1.Time{Time: timeNow.Add(-timeout - time.Second)},
+				}},
+				timeout: timeout,
+				timeNow: timeNow.Time,
+			},
+			want: time.Nanosecond,
+		},
+		{
+			name: "custom deadline expired while another task is suppressed",
+			args: args{
+				task: []workv1alpha2.GracefulEvictionTask{
+					{CreationTimestamp: &metav1.Time{Time: timeNow.Add(-time.Hour)}, SuppressDeletion: new(true)},
+					{CreationTimestamp: &metav1.Time{Time: timeNow.Add(-time.Minute)}, GracePeriodSeconds: new(int32(30))},
+				},
+				timeout: timeout,
+				timeNow: timeNow.Time,
+			},
+			want: time.Nanosecond,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

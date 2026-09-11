@@ -30,10 +30,60 @@ import (
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
 )
+
+func TestGracefulEvictionRequeuesTaskWhoseDeadlinePassesDuringInitialization(t *testing.T) {
+	for _, clusterScoped := range []bool{false, true} {
+		name := "ResourceBinding"
+		if clusterScoped {
+			name = "ClusterResourceBinding"
+		}
+		t.Run(name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, workv1alpha2.Install(scheme))
+			spec := workv1alpha2.ResourceBindingSpec{
+				GracefulEvictionTasks: []workv1alpha2.GracefulEvictionTask{{FromCluster: "member"}},
+			}
+			var binding client.Object = &workv1alpha2.ResourceBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: "binding", Namespace: "default", Generation: 1},
+				Spec:       spec,
+			}
+			if clusterScoped {
+				binding = &workv1alpha2.ClusterResourceBinding{
+					ObjectMeta: metav1.ObjectMeta{Name: "binding", Generation: 1}, Spec: spec,
+				}
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(binding).Build()
+			recorder := record.NewFakeRecorder(10)
+			var controller reconcile.Reconciler = &RBGracefulEvictionController{
+				Client: fakeClient, EventRecorder: recorder, GracefulEvictionTimeout: 0,
+			}
+			if clusterScoped {
+				controller = &CRBGracefulEvictionController{
+					Client: fakeClient, EventRecorder: recorder, GracefulEvictionTimeout: 0,
+				}
+			}
+			request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(binding)}
+			result, err := controller.Reconcile(t.Context(), request)
+			require.NoError(t, err)
+			require.Positive(t, result.RequeueAfter, "initializing the task must not lose its expired deadline")
+			result, err = controller.Reconcile(t.Context(), request)
+			require.NoError(t, err)
+			assert.Zero(t, result.RequeueAfter)
+			require.NoError(t, fakeClient.Get(t.Context(), request.NamespacedName, binding))
+			switch obj := binding.(type) {
+			case *workv1alpha2.ResourceBinding:
+				assert.Empty(t, obj.Spec.GracefulEvictionTasks)
+			case *workv1alpha2.ClusterResourceBinding:
+				assert.Empty(t, obj.Spec.GracefulEvictionTasks)
+			}
+		})
+	}
+}
 
 func TestRBGracefulEvictionController_Reconcile(t *testing.T) {
 	scheme := runtime.NewScheme()
