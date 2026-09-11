@@ -80,6 +80,13 @@ func (v *ValidatingAdmission) Handle(ctx context.Context, req admission.Request)
 		return admission.Denied(err.Error())
 	}
 
+	if features.FeatureGate.Enabled(features.MultiplePodTemplatesScheduling) {
+		if err := v.validateComponents(rb.Spec.Components, field.NewPath("spec").Child("components")); err != nil {
+			klog.Errorf("Admission denied for ResourceBinding %s/%s: %v", rb.Namespace, rb.Name, err)
+			return admission.Denied(err.Error())
+		}
+	}
+
 	if err := v.validateFederatedResourceQuota(ctx, req, rb, oldRB); err != nil {
 		if apierrors.IsInternalError(err) {
 			klog.Errorf("Internal error while processing ResourceBinding %s/%s: %v", rb.Namespace, rb.Name, err)
@@ -87,13 +94,6 @@ func (v *ValidatingAdmission) Handle(ctx context.Context, req admission.Request)
 		}
 		klog.Errorf("Admission denied for ResourceBinding %s/%s: %v", rb.Namespace, rb.Name, err)
 		return buildDenyResponse(err)
-	}
-
-	if features.FeatureGate.Enabled(features.MultiplePodTemplatesScheduling) {
-		if err := v.validateComponents(rb.Spec.Components, field.NewPath("spec").Child("components")); err != nil {
-			klog.Errorf("Admission denied for ResourceBinding %s/%s: %v", rb.Namespace, rb.Name, err)
-			return admission.Denied(err.Error())
-		}
 	}
 
 	return admission.Allowed("")
