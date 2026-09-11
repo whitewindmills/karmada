@@ -364,12 +364,18 @@ func calculatePodRequests(pods []*corev1.Pod, container string, resource corev1.
 	requests := make(map[string]int64, len(pods))
 	for _, pod := range pods {
 		podSum := int64(0)
-		for _, c := range pod.Spec.Containers {
-			if container == "" || container == c.Name {
-				if containerRequest, ok := c.Resources.Requests[resource]; ok {
-					podSum += containerRequest.MilliValue()
-				} else {
-					return nil, fmt.Errorf("missing request for %s in container %s of Pod %s", resource, c.Name, pod.ObjectMeta.Name)
+		for group, containers := range [][]corev1.Container{pod.Spec.Containers, pod.Spec.InitContainers} {
+			for _, c := range containers {
+				// Only restartable init containers contribute to steady-state utilization.
+				if group == 1 && (c.RestartPolicy == nil || *c.RestartPolicy != corev1.ContainerRestartPolicyAlways) {
+					continue
+				}
+				if container == "" || container == c.Name {
+					if containerRequest, ok := c.Resources.Requests[resource]; ok {
+						podSum += containerRequest.MilliValue()
+					} else {
+						return nil, fmt.Errorf("missing request for %s in container %s of Pod %s", resource, c.Name, pod.ObjectMeta.Name)
+					}
 				}
 			}
 		}

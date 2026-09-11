@@ -1424,6 +1424,63 @@ func TestGroupPods(t *testing.T) {
 	}
 }
 
+func TestCalculatePodRequestsNativeSidecars(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		container      string
+		missingRequest bool
+		want           int64
+		wantErr        bool
+	}{
+		{name: "running containers include sidecars", want: 200},
+		{name: "sidecar container metric", container: "sidecar", want: 100},
+		{name: "app container metric", container: "test-container", want: 100},
+		{name: "missing sidecar request is reported", missingRequest: true, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := createPod("pod", 100, 200)
+			pod.Spec.InitContainers = []corev1.Container{
+				{Name: "setup"},
+				{
+					Name: "sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways),
+					Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}},
+				},
+			}
+			if tt.missingRequest {
+				pod.Spec.InitContainers[1].Resources.Requests = nil
+			}
+			original := pod.DeepCopy()
+			got, err := calculatePodRequests([]*corev1.Pod{pod}, tt.container, corev1.ResourceCPU)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, map[string]int64{"pod": tt.want}, got)
+			}
+			assert.Equal(t, original, pod, "request calculation must not mutate informer objects")
+		})
+	}
+}
+
+func TestGetResourceReplicasNativeSidecars(t *testing.T) {
+	pods := []*corev1.Pod{createPod("pod1", 100, 200), createPod("pod2", 100, 200)}
+	for _, pod := range pods {
+		pod.Spec.InitContainers = []corev1.Container{{
+			Name: "sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways),
+			Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}},
+		}}
+	}
+	metrics := metricsclient.PodMetricsInfo{"pod1": {Value: 100}, "pod2": {Value: 100}}
+	client := &MockQueryClient{}
+	client.On("GetResourceMetric", mock.Anything, corev1.ResourceCPU, "default", labels.Everything(), "").
+		Return(metrics, time.Now(), nil).Once()
+	calculator := NewReplicaCalculator(client, 0.1, 5*time.Minute, 30*time.Second)
+	replicas, utilization, _, _, err := calculator.GetResourceReplicas(t.Context(), 2, 50, corev1.ResourceCPU, "default", labels.Everything(), "", pods, 1)
+	assert.NoError(t, err)
+	assert.Equal(t, int32(2), replicas, "sidecar requests must not cause an unnecessary scale-up")
+	assert.Equal(t, int32(50), utilization)
+}
+
 // TestCalculatePodRequests verifies the calculation of pod resource requests
 func TestCalculatePodRequests(t *testing.T) {
 	testCases := []struct {
