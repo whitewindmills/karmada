@@ -21,9 +21,9 @@ import (
 	"reflect"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -54,19 +54,22 @@ type CRBGracefulEvictionController struct {
 func (c *CRBGracefulEvictionController) Reconcile(ctx context.Context, req controllerruntime.Request) (controllerruntime.Result, error) {
 	klog.V(4).InfoS("Reconciling ClusterResourceBinding", "name", req.NamespacedName.String())
 
-	binding := &workv1alpha2.ClusterResourceBinding{}
-	if err := c.Client.Get(ctx, req.NamespacedName, binding); err != nil {
-		if apierrors.IsNotFound(err) {
-			return controllerruntime.Result{}, nil
+	var retryDuration time.Duration
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		retryDuration = 0
+		binding := &workv1alpha2.ClusterResourceBinding{}
+		if err := c.Client.Get(ctx, req.NamespacedName, binding); err != nil {
+			return client.IgnoreNotFound(err)
 		}
-		return controllerruntime.Result{}, err
-	}
 
-	if !binding.DeletionTimestamp.IsZero() {
-		return controllerruntime.Result{}, nil
-	}
+		if !binding.DeletionTimestamp.IsZero() {
+			return nil
+		}
 
-	retryDuration, err := c.syncBinding(ctx, binding)
+		var err error
+		retryDuration, err = c.syncBinding(ctx, binding)
+		return err
+	})
 	if err != nil {
 		return controllerruntime.Result{}, err
 	}
