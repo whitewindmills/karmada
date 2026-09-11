@@ -26,7 +26,8 @@ import (
 )
 
 // labelOrAnnoKeyPrefixByKarmada defines the key prefix used for labels or annotations used by karmada's own components.
-const labelOrAnnoKeyPrefixByKarmada = ".karmada.io"
+// Include the namespace separator so user domains and unqualified key names do not match.
+const labelOrAnnoKeyPrefixByKarmada = ".karmada.io/"
 
 // labelsForUserWithKarmadaPrefix enumerates special cases that labels use the karmada prefix but are really only for users to use.
 var labelsForUserWithKarmadaPrefix = map[string]struct{}{

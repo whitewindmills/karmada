@@ -22,6 +22,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
@@ -29,6 +30,37 @@ import (
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	"github.com/karmada-io/karmada/pkg/util/helper"
 )
+
+func TestResourceChangeByKarmadaMetadataNamespace(t *testing.T) {
+	tests := []struct {
+		key                 string
+		wantChangeByKarmada bool
+	}{
+		{key: "app.karmada.io/managed", wantChangeByKarmada: true},
+		{key: "app.karmada.io.example.com/user"},
+		{key: "example.com/app.karmada.io"},
+		{key: "app.karmada.io"},
+		{key: "app.karmada.iology/user"},
+	}
+	for _, field := range []string{"labels", "annotations"} {
+		for _, tt := range tests {
+			t.Run(field+"/"+tt.key, func(t *testing.T) {
+				oldObj := &unstructured.Unstructured{Object: map[string]any{
+					"metadata": map[string]any{
+						field: map[string]any{tt.key: "before"},
+					},
+				}}
+				newObj := oldObj.DeepCopy()
+				if err := unstructured.SetNestedField(newObj.Object, "after", "metadata", field, tt.key); err != nil {
+					t.Fatal(err)
+				}
+				if got := ResourceChangeByKarmada(oldObj, newObj); got != tt.wantChangeByKarmada {
+					t.Errorf("ResourceChangeByKarmada() = %v, want %v", got, tt.wantChangeByKarmada)
+				}
+			})
+		}
+	}
+}
 
 func TestSpecificationChanged(t *testing.T) {
 	tests := []struct {
