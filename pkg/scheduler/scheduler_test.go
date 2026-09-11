@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +35,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/component-base/featuregate"
 
@@ -902,6 +904,78 @@ func TestPatchScheduleResultForResourceBinding(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectedBinding.Annotations, updatedBinding.Annotations)
 				assert.Equal(t, tt.expectedBinding.Spec.Clusters, updatedBinding.Spec.Clusters)
+			}
+		})
+	}
+}
+
+func TestAssigningCacheReplaysObservedStateAfterPatch(t *testing.T) {
+	defer setFeatureGateDuringTest(t, features.FeatureGate, features.WorkloadAffinity, true)()
+	for _, tt := range []struct {
+		name        string
+		observation string
+		patchError  bool
+		preexisting bool
+		wantVersion string
+	}{
+		{name: "old informer state does not clear a new assignment", wantVersion: "1001"},
+		{name: "fully applied event arrives before patch response", observation: "applied"},
+		{name: "deletion event arrives before patch response", observation: "deleted"},
+		{name: "newer observed version is not overwritten", observation: "newer", wantVersion: "1002"},
+		{name: "patch failure does not add an entry", patchError: true},
+		{name: "patch failure preserves an existing assignment", patchError: true, preexisting: true, wantVersion: "1000"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			oldBinding := &workv1alpha2.ResourceBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: "binding", Namespace: "default", ResourceVersion: "1000"},
+				Status: workv1alpha2.ResourceBindingStatus{Conditions: []metav1.Condition{{
+					Type: workv1alpha2.FullyApplied, Status: metav1.ConditionTrue,
+				}}},
+			}
+			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+			require.NoError(t, indexer.Add(oldBinding))
+			schedulerCache := schedulercache.NewCache(nil, indexer, 0)
+			assigning := schedulerCache.AssigningResourceBindings()
+			if tt.preexisting {
+				assigning.Add(oldBinding)
+			}
+			patchError := errors.New("patch failed")
+			client := karmadafake.NewClientset(oldBinding)
+			client.PrependReactor("patch", "resourcebindings", func(clienttesting.Action) (bool, runtime.Object, error) {
+				if tt.patchError {
+					return true, nil, patchError
+				}
+				result := oldBinding.DeepCopy()
+				result.ResourceVersion = "1001"
+				result.Spec.Clusters = []workv1alpha2.TargetCluster{{Name: "member1", Replicas: 1}}
+				switch tt.observation {
+				case "applied", "newer":
+					observed := result.DeepCopy()
+					observed.ResourceVersion = "1002"
+					if tt.observation == "newer" {
+						observed.Status.Conditions = nil
+					}
+					require.NoError(t, indexer.Update(observed))
+					assigning.OnBindingUpdate(observed)
+				case "deleted":
+					require.NoError(t, indexer.Delete(oldBinding))
+					assigning.OnBindingDelete(oldBinding)
+				}
+				return true, result, nil
+			})
+			scheduler := &Scheduler{KarmadaClient: client, schedulerCache: schedulerCache}
+			err := scheduler.patchScheduleResultForResourceBinding(oldBinding, "placement", []workv1alpha2.TargetCluster{{Name: "member1", Replicas: 1}})
+			if tt.patchError {
+				require.ErrorIs(t, err, patchError)
+			} else {
+				require.NoError(t, err)
+			}
+			got := assigning.GetBindings()["default/binding"]
+			if tt.wantVersion == "" {
+				assert.Nil(t, got, "completed or failed assignment was retained")
+			} else {
+				require.NotNil(t, got)
+				assert.Equal(t, tt.wantVersion, got.ResourceVersion)
 			}
 		})
 	}

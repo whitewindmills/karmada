@@ -705,9 +705,25 @@ func (s *Scheduler) patchScheduleResultForResourceBinding(oldBinding *workv1alph
 		return err
 	}
 	if features.FeatureGate.Enabled(features.WorkloadAffinity) {
-		// TODO(@zhzhuang-zju): Consider race condition where Informer's event for 'result' arrives before this Add call,
-		// leading to a potential memory leak in AssigningResourceBindings cache if no further updates occur.
-		s.schedulerCache.AssigningResourceBindings().Add(result)
+		assigningCache := s.schedulerCache.AssigningResourceBindings()
+		assigningCache.Add(result)
+		// The informer may have handled an update or deletion before the patch returned.
+		// Replay its indexed state after adding, using the cache's version checks.
+		if indexer := s.schedulerCache.ResourceBindingIndexer(); indexer != nil {
+			observed, exists, err := indexer.GetByKey(names.NamespacedKey(result.Namespace, result.Name))
+			if err != nil {
+				return fmt.Errorf("failed to observe patched ResourceBinding %s/%s: %w", result.Namespace, result.Name, err)
+			}
+			if !exists {
+				assigningCache.OnBindingDelete(result)
+			} else {
+				binding, ok := observed.(*workv1alpha2.ResourceBinding)
+				if !ok {
+					return fmt.Errorf("unexpected ResourceBinding informer object: %T", observed)
+				}
+				assigningCache.OnBindingUpdate(binding)
+			}
+		}
 	}
 	if features.FeatureGate.Enabled(features.SchedulingOvercommitProtection) {
 		s.updateAssumptionsCache(oldBinding, scheduleResult)
