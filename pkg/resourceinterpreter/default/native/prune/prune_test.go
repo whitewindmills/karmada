@@ -18,6 +18,7 @@ package prune
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -44,6 +45,57 @@ type test struct {
 	shouldNotRemoveFields   []field
 	shouldNotRemoveResource string
 	containsFunc            func(any, string) bool
+}
+
+func TestPruneServiceAccountTokenReferences(t *testing.T) {
+	references := func(names ...string) []any {
+		result := make([]any, 0, len(names))
+		for _, name := range names {
+			result = append(result, map[string]any{"name": name})
+		}
+		return result
+	}
+	for _, tt := range []struct {
+		name    string
+		secrets any
+		want    []string
+		wantErr bool
+	}{
+		{name: "consecutive tokens first", secrets: references("foo-token-a", "foo-token-b", "user"), want: []string{"user"}},
+		{name: "consecutive tokens in the middle", secrets: references("before", "foo-token-a", "foo-token-b", "after"), want: []string{"before", "after"}},
+		{name: "all entries are tokens", secrets: references("foo-token-a", "foo-token-b", "foo-token-c")},
+		{name: "other account token is retained", secrets: references("bar-token-a", "foo-token-a"), want: []string{"bar-token-a"}},
+		{name: "empty references", secrets: references()},
+		{name: "malformed secrets list", secrets: "invalid", wantErr: true},
+		{name: "malformed secret entry", secrets: []any{"invalid"}, wantErr: true},
+		{name: "malformed secret name", secrets: []any{map[string]any{"name": int64(1)}}, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			workload := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": util.ServiceAccountKind,
+				"metadata": map[string]any{"name": "foo"},
+				"secrets":  tt.secrets,
+			}}
+			err := RemoveIrrelevantFields(workload)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("RemoveIrrelevantFields() error = %v, want error %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			retained, _, err := unstructured.NestedSlice(workload.Object, "secrets")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, item := range retained {
+				got = append(got, item.(map[string]any)["name"].(string))
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("retained references = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRemoveIrrelevantField(t *testing.T) {

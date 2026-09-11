@@ -169,18 +169,29 @@ func removeJobIrrelevantField(workload *unstructured.Unstructured) error {
 
 // removeServiceAccountIrrelevantField removes the auto-generated secrets from ServiceAccount.
 func removeServiceAccountIrrelevantField(workload *unstructured.Unstructured) error {
-	secrets, exist, _ := unstructured.NestedSlice(workload.Object, "secrets")
-	// If 'secrets' exists in ServiceAccount, remove the automatic generation secrets (e.g. default-token-xxx)
-	if exist && len(secrets) > 0 {
-		tokenPrefix := fmt.Sprintf("%s-token-", workload.GetName())
-		for idx := 0; idx < len(secrets); idx++ {
-			if strings.HasPrefix(secrets[idx].(map[string]any)["name"].(string), tokenPrefix) {
-				secrets = append(secrets[:idx], secrets[idx+1:]...)
-			}
-		}
-		_ = unstructured.SetNestedSlice(workload.Object, secrets, "secrets")
+	secrets, exist, err := unstructured.NestedSlice(workload.Object, "secrets")
+	if err != nil {
+		return fmt.Errorf("failed to read ServiceAccount secrets: %w", err)
 	}
-	return nil
+	if !exist || len(secrets) == 0 {
+		return nil
+	}
+	tokenPrefix := fmt.Sprintf("%s-token-", workload.GetName())
+	retained := secrets[:0]
+	for index, item := range secrets {
+		secret, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("ServiceAccount secret %d must be an object, got %T", index, item)
+		}
+		name, _, err := unstructured.NestedString(secret, "name")
+		if err != nil {
+			return fmt.Errorf("failed to read ServiceAccount secret %d name: %w", index, err)
+		}
+		if !strings.HasPrefix(name, tokenPrefix) {
+			retained = append(retained, item)
+		}
+	}
+	return unstructured.SetNestedSlice(workload.Object, retained, "secrets")
 }
 
 // removeServiceIrrelevantField removes cluster-local IP and node-port allocations.
