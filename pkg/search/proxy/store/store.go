@@ -42,18 +42,20 @@ type store struct {
 	// newClientFunc returns a resource client for member cluster apiserver
 	newClientFunc func() (dynamic.NamespaceableResourceInterface, error)
 
-	gvr     schema.GroupVersionResource
-	multiNS *MultiNamespace
+	gvr        schema.GroupVersionResource
+	namespaced bool
+	multiNS    *MultiNamespace
 }
 
 var _ storage.Interface = &store{}
 
-func newStore(gvr schema.GroupVersionResource, multiNS *MultiNamespace, newClientFunc func() (dynamic.NamespaceableResourceInterface, error), versioner storage.Versioner, prefix string) *store {
+func newStore(gvr schema.GroupVersionResource, namespaced bool, multiNS *MultiNamespace, newClientFunc func() (dynamic.NamespaceableResourceInterface, error), versioner storage.Versioner, prefix string) *store {
 	return &store{
 		newClientFunc: newClientFunc,
 		versioner:     versioner,
 		prefix:        prefix,
 		gvr:           gvr,
+		namespaced:    namespaced,
 		multiNS:       multiNS,
 	}
 }
@@ -65,15 +67,7 @@ func (s *store) Versioner() storage.Versioner {
 
 // Get implements storage.Interface.
 func (s *store) Get(ctx context.Context, key string, opts storage.GetOptions, objPtr runtime.Object) error {
-	var namespace, name string
-	part1, part2 := s.splitKey(key)
-	if part2 == "" {
-		// for cluster scope resource, key is /prefix/name. So parts are [name, ""]
-		name = part1
-	} else {
-		// for namespace scope resource, key is /prefix/namespace/name. So parts are [namespace, name]
-		namespace, name = part1, part2
-	}
+	namespace, name := s.splitKey(key)
 
 	if namespace != metav1.NamespaceAll && !s.multiNS.Contains(namespace) {
 		return apierrors.NewNotFound(s.gvr.GroupResource(), name)
@@ -101,8 +95,6 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 
 // List implements storage.Interface.
 func (s *store) List(ctx context.Context, key string, opts storage.ListOptions, listObj runtime.Object) error {
-	// For cluster scope resources, key is /prefix. Parts are ["", ""]
-	// For namespace scope resources, key is /prefix/namespace. Parts are [namespace, ""]
 	namespace, _ := s.splitKey(key)
 
 	reqNS, objFilter, shortCircuit := filterNS(s.multiNS, namespace)
@@ -145,8 +137,6 @@ func (s *store) WatchList(ctx context.Context, key string, opts storage.ListOpti
 
 // Watch implements storage.Interface.
 func (s *store) Watch(ctx context.Context, key string, opts storage.ListOptions) (watch.Interface, error) {
-	// For cluster scope resources, key is /prefix. Parts are ["", ""]
-	// For namespace scope resources, key is /prefix/namespace. Parts are [namespace, ""]
 	namespace, _ := s.splitKey(key)
 
 	reqNS, objFilter, shortCircuit := filterNS(s.multiNS, namespace)
@@ -271,13 +261,13 @@ func (s *store) client(namespace string) (dynamic.ResourceInterface, error) {
 }
 
 func (s *store) splitKey(key string) (string, string) {
-	// a key is like:
-	// - /prefix
-	// - /prefix/name
-	// - /prefix/namespace
-	// - /prefix/namespace/name
+	// Exact-name List/Watch keys include the name, just like Get keys.
+	// Return namespace and name according to resource scope, not key length.
 	k := strings.TrimPrefix(key, s.prefix)
 	k = strings.TrimPrefix(k, "/")
+	if !s.namespaced {
+		return "", k
+	}
 	parts := strings.SplitN(k, "/", 2)
 
 	part0, part1 := parts[0], ""
