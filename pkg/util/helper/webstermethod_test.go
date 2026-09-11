@@ -18,6 +18,7 @@ package helper
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"testing"
 )
@@ -300,6 +301,21 @@ func TestAllocateWebsterSeats(t *testing.T) {
 				{Name: "PartyB", Votes: 0, Seats: 3},
 			},
 		},
+		{
+			name:     "priority remains positive when allocation crosses the int32 denominator boundary",
+			newSeats: 3,
+			partyVotes: map[string]int64{
+				"PartyA": 2 * int64(math.MaxInt32),
+				"PartyB": 1,
+			},
+			initialAssignments: map[string]int32{
+				"PartyA": math.MaxInt32 / 2,
+			},
+			expected: []Party{
+				{Name: "PartyA", Votes: 2 * int64(math.MaxInt32), Seats: math.MaxInt32/2 + 3},
+				{Name: "PartyB", Votes: 1, Seats: 0},
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -307,6 +323,25 @@ func TestAllocateWebsterSeats(t *testing.T) {
 			got := AllocateWebsterSeats(test.newSeats, test.partyVotes, test.initialAssignments, test.tieBreaker)
 			if !reflect.DeepEqual(got, test.expected) {
 				t.Errorf("expected %v, got %v", test.expected, got)
+			}
+		})
+	}
+}
+
+func TestWebsterPriorityQueueLessLargeSeatCounts(t *testing.T) {
+	for _, seats := range []int32{math.MaxInt32 / 2, math.MaxInt32/2 + 1, math.MaxInt32 - 1, math.MaxInt32} {
+		t.Run(fmt.Sprintf("seats=%d", seats), func(t *testing.T) {
+			pq := WebsterPriorityQueue{
+				Parties: []Party{
+					{Name: "higher", Votes: 2*int64(seats) + 2, Seats: seats},
+					{Name: "lower", Votes: 1},
+				},
+			}
+			if !pq.Less(0, 1) {
+				t.Error("party with priority greater than one should precede party with priority one")
+			}
+			if pq.Less(1, 0) {
+				t.Error("party with priority one should not precede party with priority greater than one")
 			}
 		})
 	}

@@ -57,8 +57,9 @@ func (pq *WebsterPriorityQueue) Len() int {
 func (pq *WebsterPriorityQueue) Less(i, j int) bool {
 	// In the Webster method, compare the priority of two Parties:
 	// the one with the higher value of Votes/(2*Seats+1) gets the next seat.
-	iPriority := float64(pq.Parties[i].Votes) / (float64(2*pq.Parties[i].Seats + 1))
-	jPriority := float64(pq.Parties[j].Votes) / (float64(2*pq.Parties[j].Seats + 1))
+	// Convert seats before multiplying to avoid overflowing int32.
+	iPriority := float64(pq.Parties[i].Votes) / (2*float64(pq.Parties[i].Seats) + 1)
+	jPriority := float64(pq.Parties[j].Votes) / (2*float64(pq.Parties[j].Seats) + 1)
 	if iPriority == jPriority {
 		if pq.TieBreaker != nil {
 			return pq.TieBreaker(pq.Parties[i], pq.Parties[j])
