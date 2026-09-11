@@ -88,6 +88,30 @@ func TestFixedPool_Get(t *testing.T) {
 	}
 }
 
+func TestFixedPoolGetReleasesBackingReferences(t *testing.T) {
+	first, second := new(1), new(2)
+	p := New("release-references", func() (any, error) { return new(3), nil }, func(any) {}, 2)
+	p.Put(first)
+	p.Put(second)
+	for _, want := range []any{second, first} {
+		got, err := p.Get()
+		if err != nil || got != want {
+			t.Fatalf("Get() = (%v, %v), want (%v, nil)", got, err, want)
+		}
+		backing := p.pool[:cap(p.pool)]
+		for i := len(p.pool); i < len(backing); i++ {
+			if backing[i] != nil {
+				t.Errorf("unused backing slot %d still retains a removed object", i)
+			}
+		}
+	}
+	p.Put(first)
+	got, err := p.Get()
+	if err != nil || got != first {
+		t.Fatalf("reused pool returned (%v, %v), want (%v, nil)", got, err, first)
+	}
+}
+
 func TestFixedPool_Put(t *testing.T) {
 	type fields struct {
 		pool     []any

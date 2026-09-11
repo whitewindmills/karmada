@@ -79,6 +79,7 @@ func (p *FixedPool) pop() (any, bool) {
 	defer p.lock.Unlock()
 	if s := len(p.pool); s > 0 {
 		o := p.pool[s-1]
+		p.pool[s-1] = nil
 		p.pool = p.pool[:s-1]
 		return o, true
 	}
