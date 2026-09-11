@@ -829,6 +829,7 @@ func createUnreadyPod(name string, request, limit int64) *corev1.Pod {
 func TestGetObjectMetricReplicas(t *testing.T) {
 	mockClient := &MockQueryClient{}
 	calculator := NewReplicaCalculator(mockClient, 0.1, 5*time.Minute, 30*time.Second)
+	measurementTime := time.Unix(1000, 0)
 
 	testCases := []struct {
 		name             string
@@ -840,6 +841,7 @@ func TestGetObjectMetricReplicas(t *testing.T) {
 		metricSelector   labels.Selector
 		podList          []*corev1.Pod
 		objectMetric     int64
+		metricError      error
 		calibration      float64
 		expectedReplicas int32
 		expectedError    bool
@@ -861,19 +863,56 @@ func TestGetObjectMetricReplicas(t *testing.T) {
 			expectedReplicas: 6,
 			expectedError:    false,
 		},
+		{
+			name:             "Within tolerance preserves the metric timestamp",
+			currentReplicas:  2,
+			targetUsage:      10,
+			metricName:       "queue_length",
+			namespace:        "default",
+			objectRef:        &autoscalingv2.CrossVersionObjectReference{Kind: "Service", Name: "my-svc"},
+			metricSelector:   labels.Everything(),
+			objectMetric:     10,
+			calibration:      1,
+			expectedReplicas: 2,
+		},
+		{
+			name:             "Scale from zero preserves the metric timestamp",
+			targetUsage:      10,
+			metricName:       "queue_length",
+			namespace:        "default",
+			objectRef:        &autoscalingv2.CrossVersionObjectReference{Kind: "Service", Name: "my-svc"},
+			metricSelector:   labels.Everything(),
+			objectMetric:     30,
+			calibration:      1,
+			expectedReplicas: 3,
+		},
+		{
+			name:           "Metric failure does not return a sample",
+			targetUsage:    10,
+			metricName:     "queue_length",
+			namespace:      "default",
+			objectRef:      &autoscalingv2.CrossVersionObjectReference{Kind: "Service", Name: "my-svc"},
+			metricSelector: labels.Everything(),
+			metricError:    fmt.Errorf("metric unavailable"),
+			calibration:    1,
+			expectedError:  true,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			mockClient.On("GetObjectMetric", tc.metricName, tc.namespace, tc.objectRef, tc.metricSelector).Return(tc.objectMetric, time.Now(), nil).Once()
+			mockClient.On("GetObjectMetric", tc.metricName, tc.namespace, tc.objectRef, tc.metricSelector).Return(tc.objectMetric, measurementTime, tc.metricError).Once()
 
-			replicas, _, _, err := calculator.GetObjectMetricReplicas(tc.currentReplicas, tc.targetUsage, tc.metricName, tc.namespace, tc.objectRef, tc.metricSelector, tc.podList, tc.calibration)
+			replicas, usage, timestamp, err := calculator.GetObjectMetricReplicas(tc.currentReplicas, tc.targetUsage, tc.metricName, tc.namespace, tc.objectRef, tc.metricSelector, tc.podList, tc.calibration)
 
 			if tc.expectedError {
 				assert.Error(t, err)
+				assert.True(t, timestamp.IsZero())
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tc.expectedReplicas, replicas)
+				assert.Equal(t, tc.objectMetric, usage)
+				assert.Equal(t, measurementTime, timestamp)
 			}
 		})
 	}
