@@ -216,6 +216,7 @@ func (o *objectWatcherImpl) Delete(ctx context.Context, clusterName string, desi
 	clusterObj, err := helper.GetObjectFromCache(o.RESTMapper, o.InformerManager, fedKey)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
+			o.deleteVersionRecord(clusterName, o.genObjectKey(desireObj))
 			return nil
 		}
 		klog.Errorf("Failed to get the resource(kind=%s, %s/%s) from the member cluster %s, err is %v", desireObj.GetKind(), desireObj.GetNamespace(), desireObj.GetName(), clusterName, err)
@@ -225,6 +226,7 @@ func (o *objectWatcherImpl) Delete(ctx context.Context, clusterName string, desi
 	// Avoid deleting resources that are not managed by Karmada.
 	if !o.isManagedResource(clusterObj) {
 		klog.Infof("Abort deleting the resource(kind=%s, %s/%s) which exists in the member cluster %s but is not managed by Karmada.", clusterObj.GetKind(), clusterObj.GetNamespace(), clusterObj.GetName(), clusterName)
+		o.deleteVersionRecord(clusterName, o.genObjectKey(desireObj))
 		return nil
 	}
 
@@ -294,6 +296,9 @@ func (o *objectWatcherImpl) deleteVersionRecord(clusterName, resourceName string
 	o.Lock.Lock()
 	defer o.Lock.Unlock()
 	delete(o.VersionRecord[clusterName], resourceName)
+	if len(o.VersionRecord[clusterName]) == 0 {
+		delete(o.VersionRecord, clusterName)
+	}
 }
 
 func (o *objectWatcherImpl) GetVersionRecord(clusterName string, object client.Object) (string, bool) {
