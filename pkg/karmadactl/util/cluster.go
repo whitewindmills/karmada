@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	kubeclient "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -74,21 +75,28 @@ func DeleteClusterObject(controlPlaneKubeClient kubeclient.Interface, controlPla
 		klog.Warningf("Deleting the cluster object timed out. cluster name: %s, error: %v", clusterName, err)
 		klog.Infof("Start forced deletion. cluster name: %s", clusterName)
 		executionSpaceName := names.GenerateExecutionSpaceName(clusterName)
+		var cleanupErrors []error
 		err = removeWorkFinalizer(executionSpaceName, controlPlaneKarmadaClient)
 		if err != nil {
 			klog.Errorf("Force deletion. Failed to remove the finalizer of Work, error: %v", err)
+			cleanupErrors = append(cleanupErrors, err)
 		}
 
 		err = removeExecutionSpaceFinalizer(executionSpaceName, controlPlaneKubeClient)
 		if err != nil {
 			klog.Errorf("Force deletion. Failed to remove the finalizer of Namespace(%s), error: %v", executionSpaceName, err)
+			cleanupErrors = append(cleanupErrors, err)
 		}
 
 		err = removeClusterFinalizer(clusterName, controlPlaneKarmadaClient)
 		if err != nil {
 			klog.Errorf("Force deletion. Failed to remove the finalizer of Cluster(%s), error: %v", clusterName, err)
+			cleanupErrors = append(cleanupErrors, err)
 		}
 
+		if len(cleanupErrors) > 0 {
+			return utilerrors.NewAggregate(cleanupErrors)
+		}
 		klog.Infof("Forced deletion is complete.")
 		return nil
 	}
@@ -100,7 +108,7 @@ func DeleteClusterObject(controlPlaneKubeClient kubeclient.Interface, controlPla
 func removeWorkFinalizer(executionSpaceName string, controlPlaneKarmadaClient karmadaclientset.Interface) error {
 	list, err := controlPlaneKarmadaClient.WorkV1alpha1().Works(executionSpaceName).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list work in executionSpace %s", executionSpaceName)
+		return fmt.Errorf("failed to list work in executionSpace %s: %w", executionSpaceName, err)
 	}
 
 	for i := range list.Items {
@@ -110,8 +118,8 @@ func removeWorkFinalizer(executionSpaceName string, controlPlaneKarmadaClient ka
 		}
 		controllerutil.RemoveFinalizer(work, util.ExecutionControllerFinalizer)
 		_, err = controlPlaneKarmadaClient.WorkV1alpha1().Works(executionSpaceName).Update(context.TODO(), work, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to remove the finalizer of work(%s/%s)", executionSpaceName, work.GetName())
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to remove the finalizer of work(%s/%s): %w", executionSpaceName, work.GetName(), err)
 		}
 	}
 	return nil
@@ -146,7 +154,10 @@ func removeExecutionSpaceFinalizer(executionSpaceName string, controlPlaneKubeCl
 func removeClusterFinalizer(clusterName string, controlPlaneKarmadaClient karmadaclientset.Interface) error {
 	cluster, err := controlPlaneKarmadaClient.ClusterV1alpha1().Clusters().Get(context.TODO(), clusterName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get Cluster(%s)", clusterName)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get Cluster(%s): %w", clusterName, err)
 	}
 
 	if !controllerutil.ContainsFinalizer(cluster, util.ClusterControllerFinalizer) {
@@ -155,6 +166,9 @@ func removeClusterFinalizer(clusterName string, controlPlaneKarmadaClient karmad
 
 	controllerutil.RemoveFinalizer(cluster, util.ClusterControllerFinalizer)
 	_, err = controlPlaneKarmadaClient.ClusterV1alpha1().Clusters().Update(context.TODO(), cluster, metav1.UpdateOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
 
 	return err
 }
