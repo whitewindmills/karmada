@@ -33,6 +33,7 @@ import (
 // Downloader Download progress
 type Downloader struct {
 	io.Reader
+	// Total is the expected byte count; non-positive values disable percentage reporting.
 	Total   int64
 	Current int64
 }
@@ -40,6 +41,7 @@ type Downloader struct {
 // Read Implementation of Downloader
 func (d *Downloader) Read(p []byte) (n int, err error) {
 	n, err = d.Reader.Read(p)
+	d.Current += int64(n)
 	if err != nil {
 		if err != io.EOF {
 			return
@@ -48,8 +50,14 @@ func (d *Downloader) Read(p []byte) (n int, err error) {
 		return
 	}
 
-	d.Current += int64(n)
-	fmt.Printf("\rDownloading...[ %.2f%% ]", float64(d.Current*10000/d.Total)/100)
+	if n == 0 {
+		return
+	}
+	if d.Total > 0 {
+		fmt.Printf("\rDownloading...[ %.2f%% ]", float64(d.Current)/float64(d.Total)*100)
+	} else {
+		fmt.Printf("\rDownloading...[ %d bytes ]", d.Current)
+	}
 	return
 }
 

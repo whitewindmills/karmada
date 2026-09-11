@@ -21,12 +21,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 // TestDownloadFile test DownloadFile
@@ -130,6 +133,58 @@ func TestDownloadFileReplacesExistingContent(t *testing.T) {
 			}
 			if string(got) != tt.want {
 				t.Errorf("download content = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDownloaderReadBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		reader     io.Reader
+		total      int64
+		initial    int64
+		bufferSize int
+		wantN      int
+		wantErr    error
+		progress   string
+	}{
+		{name: "count bytes returned with EOF", reader: iotest.DataErrReader(strings.NewReader("abc")), total: 3, bufferSize: 8, wantN: 3, wantErr: io.EOF},
+		{name: "unknown content length", reader: strings.NewReader("abc"), total: -1, bufferSize: 8, wantN: 3},
+		{name: "zero total with data", reader: strings.NewReader("abc"), bufferSize: 8, wantN: 3},
+		{name: "zero length read", reader: strings.NewReader("abc")},
+		{name: "reader errors are preserved", reader: iotest.ErrReader(io.ErrUnexpectedEOF), bufferSize: 8, wantErr: io.ErrUnexpectedEOF},
+		{name: "large byte counts do not overflow progress", reader: strings.NewReader("x"), total: math.MaxInt64, initial: math.MaxInt64 - 1, bufferSize: 1, wantN: 1, progress: "100.00%"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := os.Create(filepath.Join(t.TempDir(), "progress"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalStdout := os.Stdout
+			os.Stdout = output
+			t.Cleanup(func() {
+				os.Stdout = originalStdout
+				_ = output.Close()
+			})
+			downloader := &Downloader{Reader: tt.reader, Total: tt.total, Current: tt.initial}
+			n, err := downloader.Read(make([]byte, tt.bufferSize))
+			wantCurrent := tt.initial + int64(tt.wantN)
+			if n != tt.wantN || err != tt.wantErr || downloader.Current != wantCurrent {
+				t.Errorf("Read() = (%d, %v), current=%d; want (%d, %v), current=%d", n, err, downloader.Current, tt.wantN, tt.wantErr, wantCurrent)
+			}
+			if _, err := output.Seek(0, io.SeekStart); err != nil {
+				t.Fatal(err)
+			}
+			progress, err := io.ReadAll(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.total <= 0 && strings.Contains(string(progress), "%") {
+				t.Errorf("unknown length should not report a percentage: %q", progress)
+			}
+			if tt.progress != "" && !strings.Contains(string(progress), tt.progress) {
+				t.Errorf("progress = %q, want %q", progress, tt.progress)
 			}
 		})
 	}
