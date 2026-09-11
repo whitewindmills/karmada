@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	resourcehelper "k8s.io/component-helpers/resource"
 
 	"github.com/karmada-io/karmada/pkg/util/lifted"
 )
@@ -248,57 +249,42 @@ func (r *Resource) MaxDivided(rl corev1.ResourceList) int64 {
 }
 
 // AddPodTemplateRequest add the effective request resource of a pod template to the origin resource.
-// If pod container limits are specified, but requests are not, default requests to limits.
+// If container-level or pod-level limits are specified, but requests are not, default requests to limits.
 // The code logic is almost the same as kubernetes.
 // https://github.com/kubernetes/kubernetes/blob/f7cdbe2c96cc12101226686df9e9819b4b007c5c/pkg/apis/core/v1/defaults.go#L147-L181
 func (r *Resource) AddPodTemplateRequest(podSpec *corev1.PodSpec) *Resource {
 	// DeepCopy first because we may modify the Resources.Requests field.
 	podSpec = podSpec.DeepCopy()
+	defaultRequestsFromLimits(podSpec.Resources)
 	for i := range podSpec.Containers {
-		// set requests to limits if requests are not specified, but limits are
-		if podSpec.Containers[i].Resources.Limits != nil {
-			if podSpec.Containers[i].Resources.Requests == nil {
-				podSpec.Containers[i].Resources.Requests = make(corev1.ResourceList)
-			}
-			for key, value := range podSpec.Containers[i].Resources.Limits {
-				if _, exists := podSpec.Containers[i].Resources.Requests[key]; !exists {
-					podSpec.Containers[i].Resources.Requests[key] = value.DeepCopy()
-				}
-			}
-		}
+		defaultRequestsFromLimits(&podSpec.Containers[i].Resources)
 	}
 	for i := range podSpec.InitContainers {
-		if podSpec.InitContainers[i].Resources.Limits != nil {
-			if podSpec.InitContainers[i].Resources.Requests == nil {
-				podSpec.InitContainers[i].Resources.Requests = make(corev1.ResourceList)
-			}
-			for key, value := range podSpec.InitContainers[i].Resources.Limits {
-				if _, exists := podSpec.InitContainers[i].Resources.Requests[key]; !exists {
-					podSpec.InitContainers[i].Resources.Requests[key] = value.DeepCopy()
-				}
-			}
-		}
+		defaultRequestsFromLimits(&podSpec.InitContainers[i].Resources)
 	}
 	return r.AddPodRequest(podSpec)
 }
 
+func defaultRequestsFromLimits(resources *corev1.ResourceRequirements) {
+	if resources == nil || resources.Limits == nil {
+		return
+	}
+	if resources.Requests == nil {
+		resources.Requests = make(corev1.ResourceList, len(resources.Limits))
+	}
+	for key, value := range resources.Limits {
+		if _, exists := resources.Requests[key]; !exists {
+			resources.Requests[key] = value.DeepCopy()
+		}
+	}
+}
+
 // AddPodRequest add the effective request resource of a pod to the origin resource.
-// The Pod's effective request is the higher of:
-// - the sum of all app containers(spec.Containers) request for a resource.
-// - the effective init containers(spec.InitContainers) request for a resource.
-// The effective init containers request is the highest request on all init containers.
+// Requests follow Kubernetes scheduling semantics, including restartable init containers,
+// pod-level resources and pod overhead, and are calculated before adding to the origin resource.
 func (r *Resource) AddPodRequest(podSpec *corev1.PodSpec) *Resource {
-	for _, container := range podSpec.Containers {
-		r.Add(container.Resources.Requests)
-	}
-	for _, container := range podSpec.InitContainers {
-		r.SetMaxResource(container.Resources.Requests)
-	}
-	// If Overhead is being utilized, add to the total requests for the pod.
-	// We assume the EnablePodOverhead feature gate of member cluster is set (it is on by default since 1.18).
-	if podSpec.Overhead != nil {
-		r.Add(podSpec.Overhead)
-	}
+	requests := resourcehelper.PodRequests(&corev1.Pod{Spec: *podSpec}, resourcehelper.PodResourcesOptions{})
+	r.Add(requests)
 	return r
 }
 

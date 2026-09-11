@@ -595,6 +595,152 @@ func TestResource_AddPodTemplateRequest(t *testing.T) {
 	}
 }
 
+func TestResource_AddPodRequest(t *testing.T) {
+	requests := func(cpu, memory string) corev1.ResourceRequirements {
+		return corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(cpu),
+			corev1.ResourceMemory: resource.MustParse(memory),
+		}}
+	}
+	always := corev1.ContainerRestartPolicyAlways
+	tests := []struct {
+		name    string
+		initial *Resource
+		podSpec *corev1.PodSpec
+		want    *Resource
+	}{
+		{
+			name:    "init requests are added to previously accumulated pods",
+			initial: &Resource{MilliCPU: 2000, Memory: 128 << 20},
+			podSpec: &corev1.PodSpec{
+				Containers:     []corev1.Container{{Resources: requests("200m", "16Mi")}},
+				InitContainers: []corev1.Container{{Resources: requests("500m", "64Mi")}},
+				Overhead:       requests("25m", "16Mi").Requests,
+			},
+			want: &Resource{MilliCPU: 2525, Memory: 208 << 20},
+		},
+		{
+			name: "sidecar runs concurrently with application containers",
+			podSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{{Resources: requests("500m", "64Mi")}},
+				InitContainers: []corev1.Container{
+					{Resources: requests("250m", "32Mi"), RestartPolicy: &always},
+				},
+			},
+			want: &Resource{MilliCPU: 750, Memory: 96 << 20},
+		},
+		{
+			name: "init peak includes only preceding sidecars",
+			podSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{{Resources: requests("300m", "16Mi")}},
+				InitContainers: []corev1.Container{
+					{Resources: requests("100m", "32Mi"), RestartPolicy: &always},
+					{Resources: requests("900m", "128Mi")},
+					{Resources: requests("200m", "16Mi"), RestartPolicy: &always},
+				},
+			},
+			want: &Resource{MilliCPU: 1000, Memory: 160 << 20},
+		},
+		{
+			name: "later sidecars do not increase an earlier init peak",
+			podSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{{Resources: requests("200m", "16Mi")}},
+				InitContainers: []corev1.Container{
+					{Resources: requests("1000m", "128Mi")},
+					{Resources: requests("100m", "16Mi"), RestartPolicy: &always},
+				},
+			},
+			want: &Resource{MilliCPU: 1000, Memory: 128 << 20},
+		},
+		{
+			name: "pod-level requests override container requests before adding overhead",
+			podSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{{Resources: requests("500m", "64Mi")}},
+				Resources: &corev1.ResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("256Mi"),
+				}},
+				Overhead: requests("10m", "8Mi").Requests,
+			},
+			want: &Resource{MilliCPU: 2010, Memory: 264 << 20},
+		},
+		{
+			name: "sidecars contribute scalar resources and ephemeral storage",
+			podSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+						"example.com/gpu":               resource.MustParse("1"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("100Mi"),
+					}},
+				}},
+				InitContainers: []corev1.Container{{
+					RestartPolicy: &always,
+					Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+						"example.com/gpu":               resource.MustParse("1"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("200Mi"),
+					}},
+				}},
+			},
+			want: &Resource{
+				EphemeralStorage: 300 << 20,
+				ScalarResources:  map[corev1.ResourceName]int64{"example.com/gpu": 2},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := EmptyResource()
+			if tt.initial != nil {
+				r = tt.initial.Clone()
+			}
+			original := tt.podSpec.DeepCopy()
+			if got := r.AddPodRequest(tt.podSpec); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("AddPodRequest() = %+v, want %+v", got, tt.want)
+			}
+			if !reflect.DeepEqual(tt.podSpec, original) {
+				t.Error("AddPodRequest() mutated the pod spec")
+			}
+		})
+	}
+}
+
+func TestResource_AddPodTemplateRequestPodResources(t *testing.T) {
+	tests := []struct {
+		name     string
+		requests corev1.ResourceList
+		wantCPU  int64
+	}{
+		{name: "missing pod-level requests default to limits", wantCPU: 2000},
+		{
+			name:     "explicit pod-level request is preserved",
+			requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1500m")},
+			wantCPU:  1500,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec := &corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app"}},
+				Resources: &corev1.ResourceRequirements{
+					Requests: tt.requests,
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("2"),
+						corev1.ResourceMemory: resource.MustParse("256Mi"),
+					},
+				},
+			}
+			original := podSpec.DeepCopy()
+			want := &Resource{MilliCPU: tt.wantCPU, Memory: 256 << 20}
+			if got := EmptyResource().AddPodTemplateRequest(podSpec); !reflect.DeepEqual(got, want) {
+				t.Errorf("AddPodTemplateRequest() = %+v, want %+v", got, want)
+			}
+			if !reflect.DeepEqual(podSpec, original) {
+				t.Error("AddPodTemplateRequest() mutated the pod spec")
+			}
+		})
+	}
+}
+
 func TestResource_Clone(t *testing.T) {
 	tests := []struct {
 		name   string
