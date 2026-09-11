@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -365,6 +366,48 @@ func Test_retainPersistentVolumeClaimFields(t *testing.T) {
 	}
 }
 
+func TestRetainJobLabelsPreservesUserChanges(t *testing.T) {
+	generated := map[string]string{
+		"controller-uid": "member-uid", "job-name": "member-job",
+		batchv1.ControllerUidLabel: "member-uid", batchv1.JobNameLabel: "member-job",
+		"selector": "stable",
+	}
+	for _, desiredLabels := range []map[string]string{
+		{"change": "new", "added": "new", "selector": "wrong", "controller-uid": "source-uid"},
+		nil,
+	} {
+		name := "change and add labels"
+		if desiredLabels == nil {
+			name = "remove user labels"
+		}
+		t.Run(name, func(t *testing.T) {
+			job := &batchv1.Job{Spec: batchv1.JobSpec{
+				Suspend:  new(true),
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"selector": "stable", batchv1.ControllerUidLabel: "member-uid"}},
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+					Labels: util.DedupeAndMergeLabels(map[string]string{"change": "old", "remove": "old"}, generated),
+				}},
+			}}
+			observed, err := helper.ToUnstructured(job)
+			require.NoError(t, err)
+			original := observed.DeepCopy()
+			job.Spec.Template.Labels = desiredLabels
+			desired, err := helper.ToUnstructured(job)
+			require.NoError(t, err)
+			retained, err := retainJobSelectorFields(desired, observed)
+			require.NoError(t, err)
+			labels, _, err := unstructured.NestedStringMap(retained.Object, "spec", "template", "metadata", "labels")
+			require.NoError(t, err)
+			want := map[string]string{}
+			if desiredLabels != nil {
+				want["change"], want["added"] = "new", "new"
+			}
+			assert.Equal(t, util.DedupeAndMergeLabels(want, generated), labels)
+			assert.Equal(t, original, observed, "retention must not mutate informer objects")
+		})
+	}
+}
+
 func Test_retainJobSelectorFields(t *testing.T) {
 	replicaNum := int32(2)
 	type args struct {
@@ -423,7 +466,7 @@ func Test_retainJobSelectorFields(t *testing.T) {
 					},
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{"name": "nginx"},
+							Labels: map[string]string{"app": "nginx_v1", "name": "nginx"},
 						},
 					},
 					Replicas: &replicaNum,
@@ -468,7 +511,7 @@ func Test_retainJobSelectorFields(t *testing.T) {
 				Spec: appsv1.DeploymentSpec{
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{"name": "nginx"},
+							Labels: map[string]string{"app": "nginx_v1"},
 						},
 					},
 					Replicas: &replicaNum,

@@ -177,7 +177,21 @@ func retainJobSelectorFields(desired, observed *unstructured.Unstructured) (*uns
 		return nil, err
 	}
 	if exist {
-		err = unstructured.SetNestedStringMap(desired.Object, templateLabels, "spec", "template", "metadata", "labels")
+		desiredLabels, _, err := unstructured.NestedStringMap(desired.Object, "spec", "template", "metadata", "labels")
+		if err != nil {
+			return nil, err
+		}
+		// Keep immutable selector and generated identity labels, not unrelated member template labels.
+		desiredLabels = util.DedupeAndMergeLabels(desiredLabels, matchLabels)
+		if desiredLabels == nil {
+			desiredLabels = make(map[string]string)
+		}
+		for _, key := range []string{"controller-uid", "job-name", batchv1.ControllerUidLabel, batchv1.JobNameLabel} {
+			if value, exists := templateLabels[key]; exists {
+				desiredLabels[key] = value
+			}
+		}
+		err = unstructured.SetNestedStringMap(desired.Object, desiredLabels, "spec", "template", "metadata", "labels")
 		if err != nil {
 			return nil, err
 		}
