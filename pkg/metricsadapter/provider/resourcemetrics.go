@@ -556,7 +556,7 @@ func (n *NodeLister) List(selector labels.Selector) (ret []*corev1.Node, err err
 			return nil, err
 		}
 		for index := range nodes {
-			nodeTyped := nodes[index]
+			nodeTyped := nodes[index].DeepCopy()
 			if nodeTyped.Annotations == nil {
 				nodeTyped.Annotations = map[string]string{}
 			}
@@ -603,7 +603,7 @@ func (n *NodeLister) Get(name string) (*corev1.Node, error) {
 			return nil, errors.NewConflict(NodesGVR.GroupResource(), name, err)
 		}
 
-		nodeTyped = node
+		nodeTyped = node.DeepCopy()
 		if nodeTyped.Annotations == nil {
 			nodeTyped.Annotations = map[string]string{}
 		}
