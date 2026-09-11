@@ -25,6 +25,74 @@ import (
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 )
 
+func TestOverrideImageWithTagAndDigest(t *testing.T) {
+	const digest = "sha256:50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c"
+	const image = "registry.example/team/image:v1@" + digest
+	tests := []struct {
+		name      string
+		component policyv1alpha1.ImageComponent
+		operator  policyv1alpha1.OverriderOperator
+		value     string
+		want      string
+	}{
+		{
+			name:      "replace registry preserves tag and digest",
+			component: policyv1alpha1.Registry,
+			operator:  policyv1alpha1.OverriderOpReplace,
+			value:     "mirror.example",
+			want:      "mirror.example/team/image:v1@" + digest,
+		},
+		{
+			name:      "remove registry preserves tag and digest",
+			component: policyv1alpha1.Registry,
+			operator:  policyv1alpha1.OverriderOpRemove,
+			want:      "team/image:v1@" + digest,
+		},
+		{
+			name:      "replace repository preserves tag and digest",
+			component: policyv1alpha1.Repository,
+			operator:  policyv1alpha1.OverriderOpReplace,
+			value:     "mirror/image",
+			want:      "registry.example/mirror/image:v1@" + digest,
+		},
+		{
+			name:      "replace tag removes old digest",
+			component: policyv1alpha1.Tag,
+			operator:  policyv1alpha1.OverriderOpReplace,
+			value:     "v2",
+			want:      "registry.example/team/image:v2",
+		},
+		{
+			name:      "replace digest removes old tag",
+			component: policyv1alpha1.Tag,
+			operator:  policyv1alpha1.OverriderOpReplace,
+			value:     digest,
+			want:      "registry.example/team/image@" + digest,
+		},
+		{
+			name:      "remove tag and digest",
+			component: policyv1alpha1.Tag,
+			operator:  policyv1alpha1.OverriderOpRemove,
+			want:      "registry.example/team/image",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := overrideImage(image, &policyv1alpha1.ImageOverrider{
+				Component: tt.component,
+				Operator:  tt.operator,
+				Value:     tt.value,
+			})
+			if err != nil {
+				t.Fatalf("overrideImage() error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("overrideImage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func generateDeploymentYaml() *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]any{

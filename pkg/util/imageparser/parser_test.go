@@ -67,6 +67,14 @@ func TestParse(t *testing.T) {
 			expectRepository: "subpath/imagename",
 			expectDigest:     "sha256:50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c",
 		},
+		{
+			name:             "tag and digest",
+			image:            "fictional.registry.example:10443/subpath/imagename:v1.0.0@sha256:50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c",
+			expectHostname:   "fictional.registry.example:10443",
+			expectRepository: "subpath/imagename",
+			expectTag:        "v1.0.0",
+			expectDigest:     "sha256:50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c",
+		},
 	}
 
 	for _, test := range tests {
@@ -92,6 +100,21 @@ func TestParse(t *testing.T) {
 				t.Fatalf("expected digest: %s, but got: %s", tc.expectDigest, comp.Digest())
 			}
 		})
+	}
+}
+
+func TestComponentsRemoveTagOrDigest(t *testing.T) {
+	comp := &Components{
+		repository: "imagename",
+		tag:        "v1.0.0",
+		digest:     "sha256:50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c",
+	}
+	comp.RemoveTagOrDigest()
+	if comp.Tag() != "" || comp.Digest() != "" {
+		t.Fatalf("expected both tag and digest to be removed, got tag %q and digest %q", comp.Tag(), comp.Digest())
+	}
+	if got := comp.String(); got != "imagename" {
+		t.Fatalf("expected untagged repository, got %q", got)
 	}
 }
 
