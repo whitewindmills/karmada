@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,7 +45,19 @@ var certFiles = []string{
 	"karmada.crt", "karmada.key",
 }
 
+type rejectCertificateTestNetwork struct {
+	t *testing.T
+}
+
+func (r rejectCertificateTestNetwork) RoundTrip(request *http.Request) (*http.Response, error) {
+	r.t.Errorf("certificate generation unit test attempted an HTTP request to %s", request.URL.Host)
+	return nil, fmt.Errorf("network is disabled in certificate generation unit tests")
+}
+
 func TestGenCerts(t *testing.T) {
+	originalClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: rejectCertificateTestNetwork{t: t}}
+	t.Cleanup(func() { http.DefaultClient = originalClient })
 	certsDir := t.TempDir()
 	certsWithCADir := t.TempDir()
 	caCertPath := filepath.Join(certsDir, "ca.crt")
@@ -91,13 +104,6 @@ func TestGenCerts(t *testing.T) {
 
 	ips := utils.FlagsIP(flagsExternalIP)
 	ips = append(ips, utils.FlagsIP(masterIP)...)
-
-	internetIP, err := utils.InternetIP()
-	if err != nil {
-		klog.Warningf("Failed to obtain internet IP, error message: %s.", err)
-	} else {
-		ips = append(ips, internetIP)
-	}
 
 	ips = append(
 		ips,
