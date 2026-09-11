@@ -17,13 +17,122 @@ limitations under the License.
 package util
 
 import (
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/transport"
 )
+
+func TestProxyHeaderTransportReusesConnections(t *testing.T) {
+	var connections atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	base := &http.Transport{}
+	defer base.CloseIdleConnections()
+	client := &http.Client{
+		Transport: NewProxyHeaderRoundTripperWrapperConstructor(nil, map[string]string{
+			"Proxy-Authorization": "Basic xyz",
+		})(base),
+		Timeout: 5 * time.Second,
+	}
+	defer client.CloseIdleConnections()
+
+	for range 3 {
+		resp, err := client.Get(server.URL)
+		require.NoError(t, err)
+		_, err = io.Copy(io.Discard, resp.Body)
+		closeErr := resp.Body.Close()
+		require.NoError(t, err)
+		require.NoError(t, closeErr)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	assert.Equal(t, int32(1), connections.Load(), "requests should share one persistent connection")
+}
+
+func TestProxyHeadersAppliedBeforeWrapping(t *testing.T) {
+	base := &http.Transport{
+		ProxyConnectHeader: http.Header{"Original": {"unchanged"}},
+	}
+	var wrappedTransport *http.Transport
+	wrapper := func(rt http.RoundTripper) http.RoundTripper {
+		var ok bool
+		wrappedTransport, ok = rt.(*http.Transport)
+		require.True(t, ok)
+		return transport.NewUserAgentRoundTripper("proxy-test", rt)
+	}
+
+	NewProxyHeaderRoundTripperWrapperConstructor(wrapper, map[string]string{
+		"Proxy-Authorization": "Basic xyz",
+	})(base)
+
+	require.NotNil(t, wrappedTransport)
+	assert.NotSame(t, base, wrappedTransport, "the shared base transport must not be modified")
+	assert.Equal(t, http.Header{"Proxy-Authorization": {"Basic xyz"}}, wrappedTransport.ProxyConnectHeader)
+	assert.Equal(t, http.Header{"Original": {"unchanged"}}, base.ProxyConnectHeader)
+}
+
+func TestProxyHeaderTransportConnect(t *testing.T) {
+	for _, withWrapper := range []bool{false, true} {
+		name := "without existing wrapper"
+		if withWrapper {
+			name = "with existing wrapper"
+		}
+		t.Run(name, func(t *testing.T) {
+			connectHeaders := make(chan http.Header, 1)
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodConnect {
+					connectHeaders <- r.Header.Clone()
+				}
+				w.WriteHeader(http.StatusBadGateway)
+			}))
+			defer proxy.Close()
+			proxyURL, err := url.Parse(proxy.URL)
+			require.NoError(t, err)
+
+			var wrapper transport.WrapperFunc
+			if withWrapper {
+				wrapper = func(rt http.RoundTripper) http.RoundTripper {
+					return transport.NewUserAgentRoundTripper("proxy-test", rt)
+				}
+			}
+			client := &http.Client{
+				Transport: NewProxyHeaderRoundTripperWrapperConstructor(wrapper, map[string]string{
+					"Proxy-Authorization": "Basic xyz",
+				})(&http.Transport{Proxy: http.ProxyURL(proxyURL)}),
+				Timeout: 5 * time.Second,
+			}
+			resp, err := client.Get("https://member.example.invalid")
+			if resp != nil {
+				defer resp.Body.Close()
+			}
+			require.Error(t, err, "the test proxy rejects CONNECT after inspecting its headers")
+			select {
+			case headers := <-connectHeaders:
+				assert.Equal(t, "Basic xyz", headers.Get("Proxy-Authorization"))
+			default:
+				t.Fatal("proxy did not receive a CONNECT request")
+			}
+		})
+	}
+}
 
 func TestNewProxyHeaderRoundTripperWrapperConstructor(t *testing.T) {
 	tests := []struct {
@@ -80,18 +189,17 @@ func TestNewProxyHeaderRoundTripperWrapperConstructor(t *testing.T) {
 			wrapper := NewProxyHeaderRoundTripperWrapperConstructor(tt.wrapperFunc, tt.headers)
 			assert.NotNil(t, wrapper, "wrapper should not be nil")
 
-			mockRT := &mockRoundTripper{}
-			rt := wrapper(mockRT)
-			phrt, ok := rt.(*proxyHeaderRoundTripper)
-			assert.True(t, ok, "should be able to cast to proxyHeaderRoundTripper")
+			rt := wrapper(&http.Transport{})
+			tr, ok := rt.(*http.Transport)
+			require.True(t, ok, "should return the configured transport")
 
 			if tt.expectedEmpty {
-				assert.Empty(t, phrt.proxyHeaders, "proxy headers should be empty")
+				assert.Empty(t, tr.ProxyConnectHeader, "proxy headers should be empty")
 				return
 			}
 
-			assert.Equal(t, tt.expectedCount, len(phrt.proxyHeaders), "should have expected number of headers")
-			assert.Equal(t, tt.expectedValues, phrt.proxyHeaders[tt.expectedHeader], "should have expected header values")
+			assert.Equal(t, tt.expectedCount, len(tr.ProxyConnectHeader), "should have expected number of headers")
+			assert.Equal(t, tt.expectedValues, tr.ProxyConnectHeader[tt.expectedHeader], "should have expected header values")
 		})
 	}
 }
@@ -137,9 +245,9 @@ func TestRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			phrt := &proxyHeaderRoundTripper{
-				proxyHeaders: parseProxyHeaders(tt.headers),
-				roundTripper: tt.roundTripper,
+			rt := NewProxyHeaderRoundTripperWrapperConstructor(nil, tt.headers)(tt.roundTripper)
+			if tr, ok := rt.(*http.Transport); ok {
+				defer tr.CloseIdleConnections()
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -150,7 +258,7 @@ func TestRoundTrip(t *testing.T) {
 			req, err := http.NewRequest(http.MethodGet, server.URL, nil)
 			assert.NoError(t, err, "should create request without error")
 
-			resp, err := phrt.RoundTrip(req)
+			resp, err := rt.RoundTrip(req)
 
 			if tt.expectedError {
 				assert.Error(t, err, "should return error")
@@ -158,8 +266,11 @@ func TestRoundTrip(t *testing.T) {
 				return
 			}
 
-			assert.NoError(t, err, "should not return error")
-			assert.NotNil(t, resp, "response should not be nil")
+			require.NoError(t, err, "should not return error")
+			require.NotNil(t, resp, "response should not be nil")
+			if resp.Body != nil {
+				defer resp.Body.Close()
+			}
 			assert.Equal(t, tt.expectedStatus, resp.StatusCode, "should have expected status code")
 		})
 	}

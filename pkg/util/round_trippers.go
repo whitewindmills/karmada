@@ -24,34 +24,20 @@ import (
 	"k8s.io/client-go/transport"
 )
 
-type proxyHeaderRoundTripper struct {
-	proxyHeaders http.Header
-	roundTripper http.RoundTripper
-}
-
-var _ http.RoundTripper = &proxyHeaderRoundTripper{}
-
 // NewProxyHeaderRoundTripperWrapperConstructor returns a RoundTripper wrapper that's usable within restConfig.WrapTransport.
+// It configures a private transport once so requests can reuse its connections.
 func NewProxyHeaderRoundTripperWrapperConstructor(wt transport.WrapperFunc, headers map[string]string) transport.WrapperFunc {
 	return func(rt http.RoundTripper) http.RoundTripper {
+		if tr, ok := rt.(*http.Transport); ok {
+			tr = tr.Clone()
+			tr.ProxyConnectHeader = parseProxyHeaders(headers)
+			rt = tr
+		}
 		if wt != nil {
 			rt = wt(rt)
 		}
-		return &proxyHeaderRoundTripper{
-			proxyHeaders: parseProxyHeaders(headers),
-			roundTripper: rt,
-		}
+		return rt
 	}
-}
-
-// RoundTrip implements the http.RoundTripper interface.
-func (r *proxyHeaderRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if tr, ok := r.roundTripper.(*http.Transport); ok {
-		tr = tr.Clone()
-		tr.ProxyConnectHeader = r.proxyHeaders
-		return tr.RoundTrip(req)
-	}
-	return r.roundTripper.RoundTrip(req)
 }
 
 func parseProxyHeaders(headers map[string]string) http.Header {
