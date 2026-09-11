@@ -86,7 +86,7 @@ type assignState struct {
 	// the number of assignable replicas and is generally used as dynamic weight.
 	availableClusters []workv1alpha2.TargetCluster
 	// availableReplicas is the number of replicas that can be assigned in this round. It is calculated from availableClusters.
-	availableReplicas int32
+	availableReplicas int64
 
 	// targetReplicas is the replicas that we need to schedule in this round
 	targetReplicas int32
@@ -143,7 +143,10 @@ func (as *assignState) buildScheduledClusters() {
 
 func (as *assignState) buildAvailableClusters(c calculator) {
 	as.availableClusters = c(as.candidates, as.spec)
-	as.availableReplicas = util.GetSumOfReplicas(as.availableClusters)
+	as.availableReplicas = 0
+	for _, cluster := range as.availableClusters {
+		as.availableReplicas += int64(cluster.Replicas)
+	}
 }
 
 // resortAvailableClusters is used to make sure scheduledClusters are at the front of availableClusters

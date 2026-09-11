@@ -18,6 +18,7 @@ package core
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
@@ -73,16 +74,16 @@ func getStaticWeightInfoList(clusters []spreadconstraint.ClusterDetailInfo, weig
 
 // dynamicDivideReplicas assigns a total number of replicas to the selected clusters by preference according to the resource.
 func dynamicDivideReplicas(state *assignState) ([]workv1alpha2.TargetCluster, error) {
-	if state.availableReplicas < state.targetReplicas {
+	if state.availableReplicas < int64(state.targetReplicas) {
 		return nil, &framework.UnschedulableError{Message: fmt.Sprintf("Clusters available replicas %d are not enough to schedule.", state.availableReplicas)}
 	}
 
 	switch state.strategyType {
 	case AggregatedStrategy:
 		state.availableClusters = state.resortAvailableClusters()
-		var sum int32
+		var sum int64
 		for i := range state.availableClusters {
-			if sum += state.availableClusters[i].Replicas; sum >= state.targetReplicas {
+			if sum += int64(state.availableClusters[i].Replicas); sum >= int64(state.targetReplicas) {
 				state.availableClusters = state.availableClusters[:i+1]
 				break
 			}
@@ -153,7 +154,8 @@ func dynamicFreshScale(state *assignState) ([]workv1alpha2.TargetCluster, error)
 				if availableCluster.Name != scheduledCluster.Name {
 					continue
 				}
-				clusterAvailableReplicas[i].Replicas += scheduledCluster.Replicas
+				// A cluster cannot receive more than MaxInt32 replicas, even if its total capacity is larger.
+				clusterAvailableReplicas[i].Replicas = int32(min(int64(availableCluster.Replicas)+int64(scheduledCluster.Replicas), math.MaxInt32)) // #nosec G115: bounded by math.MaxInt32
 				break
 			}
 		}

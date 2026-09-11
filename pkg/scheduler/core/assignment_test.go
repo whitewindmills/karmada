@@ -18,6 +18,7 @@ package core
 
 import (
 	"errors"
+	"math"
 	"reflect"
 	"testing"
 
@@ -976,5 +977,87 @@ func Test_assignByDynamicStrategy_UnschedulableErrorPreserved(t *testing.T) {
 	var unschedulableErr *framework.UnschedulableError
 	if !errors.As(err, &unschedulableErr) {
 		t.Errorf("assignByDynamicStrategy() error type not preserved: errors.As(*UnschedulableError) = false, error = %v", err)
+	}
+}
+
+func Test_assignByDynamicStrategy_LargeCapacity(t *testing.T) {
+	tests := []struct {
+		name       string
+		strategy   *policyv1alpha1.ReplicaSchedulingStrategy
+		mode       assignmentMode
+		capacities []int32
+		scheduled  []workv1alpha2.TargetCluster
+		replicas   int32
+		want       []workv1alpha2.TargetCluster
+	}{
+		{
+			name:       "dynamic weight with total capacity exceeding int32",
+			strategy:   dynamicWeightStrategy,
+			mode:       Steady,
+			capacities: []int32{math.MaxInt32 - 1, math.MaxInt32 - 1},
+			replicas:   12,
+			want: []workv1alpha2.TargetCluster{
+				{Name: ClusterMember1, Replicas: 6},
+				{Name: ClusterMember2, Replicas: 6},
+			},
+		},
+		{
+			name:       "aggregated stops after enough capacity despite overflow",
+			strategy:   aggregatedStrategy,
+			mode:       Steady,
+			capacities: []int32{6, math.MaxInt32 - 1, math.MaxInt32 - 2},
+			scheduled:  []workv1alpha2.TargetCluster{{Name: ClusterMember1, Replicas: 1}},
+			replicas:   11,
+			want: []workv1alpha2.TargetCluster{
+				{Name: ClusterMember1, Replicas: 1},
+				{Name: ClusterMember2, Replicas: 10},
+			},
+		},
+		{
+			name:       "fresh dynamic weight restores assigned capacity without overflow",
+			strategy:   dynamicWeightStrategy,
+			mode:       Fresh,
+			capacities: []int32{math.MaxInt32 - 1},
+			scheduled:  []workv1alpha2.TargetCluster{{Name: ClusterMember1, Replicas: 10}},
+			replicas:   12,
+			want:       []workv1alpha2.TargetCluster{{Name: ClusterMember1, Replicas: 12}},
+		},
+		{
+			name:       "fresh aggregated restores assigned capacity without overflow",
+			strategy:   aggregatedStrategy,
+			mode:       Fresh,
+			capacities: []int32{math.MaxInt32 - 1},
+			scheduled:  []workv1alpha2.TargetCluster{{Name: ClusterMember1, Replicas: 10}},
+			replicas:   12,
+			want:       []workv1alpha2.TargetCluster{{Name: ClusterMember1, Replicas: 12}},
+		},
+	}
+	clusterNames := []string{ClusterMember1, ClusterMember2, ClusterMember3}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidates := make([]spreadconstraint.ClusterDetailInfo, len(tt.capacities))
+			for i, capacity := range tt.capacities {
+				candidates[i] = spreadconstraint.ClusterDetailInfo{
+					Name:                clusterNames[i],
+					AllocatableReplicas: capacity,
+				}
+			}
+			spec := &workv1alpha2.ResourceBindingSpec{
+				Replicas: tt.replicas,
+				Clusters: tt.scheduled,
+				Placement: &policyv1alpha1.Placement{
+					ReplicaScheduling: tt.strategy,
+				},
+			}
+			state := newAssignState(candidates, spec, &workv1alpha2.ResourceBindingStatus{})
+			state.assignmentMode = tt.mode
+			got, err := assignByDynamicStrategy(state)
+			if err != nil {
+				t.Fatalf("assignByDynamicStrategy() error = %v", err)
+			}
+			if !helper.IsScheduleResultEqual(got, tt.want) {
+				t.Errorf("assignByDynamicStrategy() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
