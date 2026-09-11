@@ -334,7 +334,7 @@ func patchVolumeForStatefulSet(sts *appsv1.StatefulSet, volume *operatorv1alpha1
 		volumes = append(volumes, corev1.Volume{
 			Name: constants.EtcdDataVolumeName,
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				EmptyDir: volume.EmptyDir.DeepCopy(),
 			},
 		})
 		sts.Spec.Template.Spec.Volumes = volumes

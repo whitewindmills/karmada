@@ -17,7 +17,9 @@ limitations under the License.
 package etcd
 
 import (
+	"context"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,9 +27,12 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	fakeclientset "k8s.io/client-go/kubernetes/fake"
 	coretesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
 
 	operatorv1alpha1 "github.com/karmada-io/karmada/operator/pkg/apis/operator/v1alpha1"
 	"github.com/karmada-io/karmada/operator/pkg/constants"
@@ -95,6 +100,74 @@ func TestEnsureKarmadaEtcd(t *testing.T) {
 
 	if pdbCount != 1 {
 		t.Errorf("expected 1 PDB action, but got %d", pdbCount)
+	}
+}
+
+func TestEnsureKarmadaEtcdPreservesEmptyDir(t *testing.T) {
+	tests := []struct {
+		name     string
+		emptyDir corev1.EmptyDirVolumeSource
+	}{
+		{
+			name: "default disk storage",
+		},
+		{
+			name: "memory storage",
+			emptyDir: corev1.EmptyDirVolumeSource{
+				Medium: corev1.StorageMediumMemory,
+			},
+		},
+		{
+			name: "disk storage with size limit",
+			emptyDir: corev1.EmptyDirVolumeSource{
+				SizeLimit: new(resource.MustParse("2Gi")),
+			},
+		},
+		{
+			name: "memory storage with size limit",
+			emptyDir: corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: new(resource.MustParse("1Gi")),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const name, namespace = "karmada-demo", "test"
+			cfg := &operatorv1alpha1.LocalEtcd{
+				CommonSettings: operatorv1alpha1.CommonSettings{
+					Image: operatorv1alpha1.Image{
+						ImageRepository: "registry.k8s.io/etcd",
+						ImageTag:        "latest",
+					},
+					Replicas:        ptr.To[int32](1),
+					ImagePullPolicy: corev1.PullIfNotPresent,
+				},
+				VolumeData: &operatorv1alpha1.VolumeData{
+					EmptyDir: tt.emptyDir.DeepCopy(),
+				},
+			}
+			client := fakeclientset.NewClientset()
+			for _, phase := range []string{"create", "update"} {
+				if err := EnsureKarmadaEtcd(client, cfg, name, namespace); err != nil {
+					t.Fatalf("%s etcd: %v", phase, err)
+				}
+				sts, err := client.AppsV1().StatefulSets(namespace).Get(context.Background(), util.KarmadaEtcdName(name), metav1.GetOptions{})
+				if err != nil {
+					t.Fatalf("%s get etcd StatefulSet: %v", phase, err)
+				}
+				index := slices.IndexFunc(sts.Spec.Template.Spec.Volumes, func(volume corev1.Volume) bool {
+					return volume.Name == constants.EtcdDataVolumeName
+				})
+				if index == -1 {
+					t.Fatalf("%s missing etcd data volume", phase)
+				}
+				got := sts.Spec.Template.Spec.Volumes[index].EmptyDir
+				if !reflect.DeepEqual(got, &tt.emptyDir) {
+					t.Errorf("%s etcd EmptyDir = %v, want %v", phase, got, &tt.emptyDir)
+				}
+			}
+		})
 	}
 }
 

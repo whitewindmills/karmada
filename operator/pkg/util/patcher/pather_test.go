@@ -344,7 +344,7 @@ func TestPatchForStatefulSet(t *testing.T) {
 				volume: &v1alpha1.VolumeData{
 					EmptyDir: &corev1.EmptyDirVolumeSource{
 						Medium:    corev1.StorageMediumMemory,
-						SizeLimit: &resource.Quantity{},
+						SizeLimit: new(resource.MustParse("1Gi")),
 					},
 					HostPath: &corev1.HostPathVolumeSource{
 						Path: "/tmp",
@@ -408,7 +408,10 @@ func TestPatchForStatefulSet(t *testing.T) {
 								{
 									Name: constants.EtcdDataVolumeName,
 									VolumeSource: corev1.VolumeSource{
-										EmptyDir: &corev1.EmptyDirVolumeSource{},
+										EmptyDir: &corev1.EmptyDirVolumeSource{
+											Medium:    corev1.StorageMediumMemory,
+											SizeLimit: new(resource.MustParse("1Gi")),
+										},
 									},
 								},
 								{
