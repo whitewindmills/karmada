@@ -737,6 +737,59 @@ func TestGetDependenciesFromPodTemplate(t *testing.T) {
 	}
 }
 
+func TestGetDependenciesFromPodTemplateOrdering(t *testing.T) {
+	pod := helper.NewPod(namespace, podName)
+	pod.Spec.ServiceAccountName = "custom-account"
+	for _, suffix := range []string{"c", "b", "a"} {
+		pod.Spec.Volumes = append(pod.Spec.Volumes,
+			corev1.Volume{Name: "cm-" + suffix, VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "cm-" + suffix}},
+			}},
+			corev1.Volume{Name: "secret-" + suffix, VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: "secret-" + suffix},
+			}},
+			corev1.Volume{Name: "pvc-" + suffix, VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc-" + suffix},
+			}},
+		)
+	}
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		Name: "duplicate-configmap",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "cm-a"}},
+		},
+	})
+	var want []configv1alpha1.DependentObjectReference
+	for _, group := range []struct {
+		kind  string
+		names []string
+	}{
+		{kind: "ConfigMap", names: []string{"cm-a", "cm-b", "cm-c"}},
+		{kind: "Secret", names: []string{"secret-a", "secret-b", "secret-c"}},
+		{kind: "ServiceAccount", names: []string{"custom-account"}},
+		{kind: "PersistentVolumeClaim", names: []string{"pvc-a", "pvc-b", "pvc-c"}},
+	} {
+		for _, name := range group.names {
+			want = append(want, configv1alpha1.DependentObjectReference{
+				APIVersion: "v1", Kind: group.kind, Namespace: namespace, Name: name,
+			})
+		}
+	}
+	original := pod.DeepCopy()
+	for i := range 20 {
+		got, err := GetDependenciesFromPodTemplate(pod)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("iteration %d: dependencies = %v, want %v", i, got, want)
+		}
+	}
+	if !reflect.DeepEqual(pod, original) {
+		t.Error("dependency extraction mutated the pod")
+	}
+}
+
 func Test_getServiceAccountNames(t *testing.T) {
 	type args struct {
 		pod *corev1.Pod

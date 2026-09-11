@@ -81,13 +81,14 @@ func GeneratePodFromTemplateAndNamespace(template *corev1.PodTemplateSpec, names
 
 // GetDependenciesFromPodTemplate extracts the dependencies from the given pod and returns that.
 // returns DependentObjectReferences according to the pod, including ConfigMap, Secret, ServiceAccount and PersistentVolumeClaim.
+// Names are sorted within each kind so unchanged dependencies have a stable serialized representation.
 func GetDependenciesFromPodTemplate(podObj *corev1.Pod) ([]configv1alpha1.DependentObjectReference, error) {
 	dependentConfigMaps := getConfigMapNames(podObj)
 	dependentSecrets := getSecretNames(podObj)
 	dependentSas := getServiceAccountNames(podObj)
 	dependentPVCs := getPVCNames(podObj)
 	var dependentObjectRefs []configv1alpha1.DependentObjectReference
-	for cm := range dependentConfigMaps {
+	for _, cm := range sets.List(dependentConfigMaps) {
 		dependentObjectRefs = append(dependentObjectRefs, configv1alpha1.DependentObjectReference{
 			APIVersion: "v1",
 			Kind:       "ConfigMap",
@@ -96,7 +97,7 @@ func GetDependenciesFromPodTemplate(podObj *corev1.Pod) ([]configv1alpha1.Depend
 		})
 	}
 
-	for secret := range dependentSecrets {
+	for _, secret := range sets.List(dependentSecrets) {
 		dependentObjectRefs = append(dependentObjectRefs, configv1alpha1.DependentObjectReference{
 			APIVersion: "v1",
 			Kind:       "Secret",
@@ -105,7 +106,7 @@ func GetDependenciesFromPodTemplate(podObj *corev1.Pod) ([]configv1alpha1.Depend
 		})
 	}
 
-	for sa := range dependentSas {
+	for _, sa := range sets.List(dependentSas) {
 		dependentObjectRefs = append(dependentObjectRefs, configv1alpha1.DependentObjectReference{
 			APIVersion: "v1",
 			Kind:       "ServiceAccount",
@@ -114,7 +115,7 @@ func GetDependenciesFromPodTemplate(podObj *corev1.Pod) ([]configv1alpha1.Depend
 		})
 	}
 
-	for pvc := range dependentPVCs {
+	for _, pvc := range sets.List(dependentPVCs) {
 		dependentObjectRefs = append(dependentObjectRefs, configv1alpha1.DependentObjectReference{
 			APIVersion: "v1",
 			Kind:       "PersistentVolumeClaim",
