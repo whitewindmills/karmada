@@ -249,6 +249,11 @@ func (c *Controller) cleanupPolicyClaimMetadata(ctx context.Context, work *workv
 			return err
 		}
 
+		// An earlier finalization attempt may already have released this resource.
+		if util.GetLabelValue(clusterObj.GetLabels(), util.ManagedByKarmadaLabel) != util.ManagedByKarmadaLabelValue {
+			continue
+		}
+
 		if workload.GetNamespace() == corev1.NamespaceAll {
 			detector.CleanupCPPClaimMetadata(workload)
 		} else {

@@ -397,6 +397,85 @@ func TestPreservationCleanupSkipsMissingResources(t *testing.T) {
 	}
 }
 
+func TestPreservationCleanupLeavesUnmanagedResourcesUntouched(t *testing.T) {
+	for _, alreadyUnmanaged := range []bool{false, true} {
+		name := "retry after finalizer update failure"
+		if alreadyUnmanaged {
+			name = "unmanaged resource already exists"
+		}
+		t.Run(name, func(t *testing.T) {
+			desired := newManagedUnstructuredPod("1", map[string]any{
+				"containers": []any{map[string]any{"name": "test", "image": "image"}},
+			}, nil)
+			util.RecordManagedLabels(desired)
+			util.RecordManagedAnnotations(desired)
+			raw, err := desired.MarshalJSON()
+			require.NoError(t, err)
+			work := testhelper.NewWork(testWorkName, testWorkNS, string(uuid.NewUUID()), raw)
+			work.SetDeletionTimestamp(new(metav1.Now()))
+			work.SetFinalizers([]string{util.ExecutionControllerFinalizer})
+			work.Spec.PreserveResourcesOnDeletion = new(true)
+			observed := desired.DeepCopy()
+			if alreadyUnmanaged {
+				observed.SetLabels(map[string]string{"owner": "member"})
+				observed.SetAnnotations(map[string]string{"example.com/config": "member"})
+			}
+			memberClient := dynamicfake.NewSimpleDynamicClient(scheme.Scheme, observed)
+			indexer := toolscache.NewIndexer(toolscache.MetaNamespaceKeyFunc, toolscache.Indexers{})
+			require.NoError(t, indexer.Add(observed))
+			manager := genericmanagerfake.NewFakeMultiClusterInformerManager(map[string]genericmanager.SingleClusterInformerManager{
+				clusterName: genericmanagerfake.NewFakeSingleClusterManager(true, true,
+					func(resource schema.GroupVersionResource) toolscache.GenericLister {
+						return toolscache.NewGenericLister(indexer, resource.GroupResource())
+					}),
+			})
+			finalizerError := fmt.Errorf("finalizer update failed")
+			finalizerUpdates := 0
+			controlClient := fake.NewClientBuilder().WithScheme(gclient.NewSchema()).
+				WithObjects(work, newCluster(clusterName, clusterv1alpha1.ClusterConditionReady, metav1.ConditionTrue)).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						finalizerUpdates++
+						if !alreadyUnmanaged && finalizerUpdates == 1 {
+							return finalizerError
+						}
+						return c.Update(ctx, obj, opts...)
+					},
+				}).Build()
+			mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+			mapper.Add(corev1.SchemeGroupVersion.WithKind("Pod"), meta.RESTScopeNamespace)
+			clusterClient := func(string, client.Client, *util.ClientOption) (*util.DynamicClusterClient, error) {
+				return &util.DynamicClusterClient{ClusterName: clusterName, DynamicClientSet: memberClient}, nil
+			}
+			controller := &Controller{
+				Client: controlClient, RESTMapper: mapper, InformerManager: manager,
+				ObjectWatcher: objectwatcher.NewObjectWatcher(controlClient, mapper, clusterClient, nil,
+					FakeResourceInterpreter{DefaultInterpreter: native.NewDefaultInterpreter()}, manager),
+			}
+			request := controllerruntime.Request{NamespacedName: client.ObjectKeyFromObject(work)}
+			resourceClient := memberClient.Resource(corev1.SchemeGroupVersion.WithResource("pods")).Namespace(desired.GetNamespace())
+			if !alreadyUnmanaged {
+				_, err = controller.Reconcile(t.Context(), request)
+				require.ErrorIs(t, err, finalizerError)
+				observed, err = resourceClient.Get(t.Context(), desired.GetName(), metav1.GetOptions{})
+				require.NoError(t, err)
+				require.Empty(t, observed.GetLabels()[util.ManagedByKarmadaLabel])
+				require.NoError(t, indexer.Update(observed))
+			}
+			memberClient.ClearActions()
+			_, err = controller.Reconcile(t.Context(), request)
+			require.NoError(t, err)
+			assert.True(t, apierrors.IsNotFound(controlClient.Get(t.Context(), request.NamespacedName, work)))
+			actual, err := resourceClient.Get(t.Context(), desired.GetName(), metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, observed, actual)
+			for _, action := range memberClient.Actions() {
+				assert.Equal(t, "get", action.GetVerb(), "unmanaged resources must not be modified during preservation cleanup")
+			}
+		})
+	}
+}
+
 func TestExecutionController_NewGVRInformerRequeuesWorkForMemberResourceChangedBeforeSync(t *testing.T) {
 	const testTimeout = 5 * time.Second
 
