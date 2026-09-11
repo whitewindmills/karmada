@@ -183,7 +183,8 @@ func (c *CertRotationController) syncCertRotation(ctx context.Context, secret *c
 
 	var newCertData []byte
 	klog.V(1).InfoS("Waiting for the client certificate to be issued")
-	err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 5*time.Minute, false, func(context.Context) (done bool, err error) {
+	// Use the polling context to also bound an in-flight CSR request.
+	err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 5*time.Minute, false, func(ctx context.Context) (done bool, err error) {
 		csr, err := c.KubeClient.CertificatesV1().CertificateSigningRequests().Get(ctx, csr, metav1.GetOptions{})
 		if err != nil {
 			return false, fmt.Errorf("failed to get the cluster csr %s. err: %v", clusterName, err)

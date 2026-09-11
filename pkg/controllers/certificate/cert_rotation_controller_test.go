@@ -23,9 +23,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
+	"io"
 	"math/big"
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	certificatesv1 "k8s.io/api/certificates/v1"
@@ -33,6 +38,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
+	restfake "k8s.io/client-go/rest/fake"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -392,5 +401,97 @@ func TestSignerNameMatchesAgentCSRApprover(t *testing.T) {
 	wantSigner := certificatesv1.KubeAPIServerClientSignerName
 	if csr.Spec.SignerName != wantSigner {
 		t.Errorf("CSR SignerName = %q, want %q (must match agent_csr_approving expectation)", csr.Spec.SignerName, wantSigner)
+	}
+}
+
+func TestCertRotationController_CSRRequestTimeout(t *testing.T) {
+	tests := []struct {
+		name          string
+		parentTimeout time.Duration
+		wantElapsed   time.Duration
+	}{
+		{
+			name:          "issuance timeout cancels a stalled request",
+			parentTimeout: 10 * time.Minute,
+			wantElapsed:   5 * time.Minute,
+		},
+		{
+			name:          "earlier parent deadline is preserved",
+			parentTimeout: 2 * time.Minute,
+			wantElapsed:   2 * time.Minute,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				cert, err := newMockCert(time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+				if err != nil {
+					t.Fatal(err)
+				}
+				kubeconfigData, err := clientcmd.Write(clientcmdapi.Config{
+					CurrentContext: "member",
+					Clusters: map[string]*clientcmdapi.Cluster{
+						"karmada": {Server: "https://karmada.invalid"},
+					},
+					Contexts: map[string]*clientcmdapi.Context{
+						"member": {Cluster: "karmada", AuthInfo: "member"},
+					},
+					AuthInfos: map[string]*clientcmdapi.AuthInfo{
+						"member": {ClientCertificateData: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})},
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "karmada-system", Name: KarmadaKubeconfigName},
+					Data:       map[string][]byte{KarmadaKubeconfigName: kubeconfigData},
+				}
+				httpRequests := 0
+				getRequests := 0
+				httpClient := restfake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+					httpRequests++
+					switch req.Method {
+					case http.MethodPost:
+						return &http.Response{
+							StatusCode: http.StatusCreated,
+							Header:     http.Header{"Content-Type": {"application/json"}},
+							Body:       io.NopCloser(strings.NewReader(`{"apiVersion":"certificates.k8s.io/v1","kind":"CertificateSigningRequest"}`)),
+						}, nil
+					case http.MethodGet:
+						getRequests++
+						<-req.Context().Done()
+						return nil, req.Context().Err()
+					default:
+						return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+					}
+				})
+				kubeClient, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://karmada.invalid"}, httpClient)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := &CertRotationController{
+					KubeClient:                         kubeClient,
+					ClusterClient:                      &util.ClusterClient{KubeClient: kubeClient},
+					CertRotationRemainingTimeThreshold: 1,
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), tt.parentTimeout)
+				defer cancel()
+
+				start := time.Now()
+				if err := c.syncCertRotation(ctx, secret); err == nil {
+					t.Fatal("expected a timeout waiting for the certificate")
+				}
+				if elapsed := time.Since(start); elapsed != tt.wantElapsed {
+					t.Errorf("certificate request took %s, want %s", elapsed, tt.wantElapsed)
+				}
+				if getRequests != 1 {
+					t.Errorf("CSR GET requests = %d, want 1", getRequests)
+				}
+				if httpRequests != 2 {
+					t.Errorf("HTTP requests = %d, want only CSR create and get without a secret update", httpRequests)
+				}
+			})
+		})
 	}
 }
