@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 
@@ -246,12 +247,16 @@ func traverseToFindEmptyFieldNeededModify(root gjson.Result, fieldPath, fieldPat
 	return fieldOfEmptySliceToStruct, fieldOfEmptySliceToDelete
 }
 
-// ConvertLuaResultToInt convert lua result to int.
+// ConvertLuaResultToInt converts a Lua number to int32 without truncation or overflow.
 func ConvertLuaResultToInt(luaResult lua.LValue) (int32, error) {
 	if luaResult.Type() != lua.LTNumber {
 		return 0, fmt.Errorf("result type %#v is not number", luaResult.Type())
 	}
-	return int32(luaResult.(lua.LNumber)), nil
+	value := float64(luaResult.(lua.LNumber))
+	if value < math.MinInt32 || value > math.MaxInt32 || math.Trunc(value) != value {
+		return 0, fmt.Errorf("result %v is not an integer within int32 range", value)
+	}
+	return int32(value), nil
 }
 
 // ConvertLuaResultToBool convert lua result to bool.

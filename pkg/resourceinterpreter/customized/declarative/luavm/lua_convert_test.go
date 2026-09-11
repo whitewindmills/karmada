@@ -18,6 +18,7 @@ package luavm
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"testing"
 
@@ -28,6 +29,53 @@ import (
 
 	configv1alpha1 "github.com/karmada-io/karmada/pkg/apis/config/v1alpha1"
 )
+
+func TestConvertLuaResultToIntBounds(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		value   lua.LValue
+		want    int32
+		wantErr bool
+	}{
+		{name: "zero", value: lua.LNumber(0)},
+		{name: "positive", value: lua.LNumber(3), want: 3},
+		{name: "negative integer", value: lua.LNumber(-3), want: -3},
+		{name: "maximum", value: lua.LNumber(math.MaxInt32), want: math.MaxInt32},
+		{name: "minimum", value: lua.LNumber(math.MinInt32), want: math.MinInt32},
+		{name: "positive fraction", value: lua.LNumber(1.5), wantErr: true},
+		{name: "negative fraction", value: lua.LNumber(-1.5), wantErr: true},
+		{name: "overflow", value: lua.LNumber(math.MaxInt32 + 1), wantErr: true},
+		{name: "underflow", value: lua.LNumber(math.MinInt32 - 1), wantErr: true},
+		{name: "positive infinity", value: lua.LNumber(math.Inf(1)), wantErr: true},
+		{name: "negative infinity", value: lua.LNumber(math.Inf(-1)), wantErr: true},
+		{name: "not a number", value: lua.LNumber(math.NaN()), wantErr: true},
+		{name: "string", value: lua.LString("3"), wantErr: true},
+		{name: "nil", value: lua.LNil, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ConvertLuaResultToInt(tt.value)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("value %v: error = %v, want error = %v", tt.value, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("converted value = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetReplicasRejectsUnrepresentableIntegers(t *testing.T) {
+	vm := New(false, 1)
+	object := &unstructured.Unstructured{Object: map[string]any{}}
+	for _, expression := range []string{"1.5", "2147483648", "-2147483649", "math.huge", "-math.huge", "0/0"} {
+		t.Run(expression, func(t *testing.T) {
+			_, _, err := vm.GetReplicas(object, "function GetReplicas(object) return "+expression+", {} end")
+			if err == nil {
+				t.Fatalf("GetReplicas accepted non-int32 result %s", expression)
+			}
+		})
+	}
+}
 
 func TestConvertLuaResultToStruct(t *testing.T) {
 	type barStruct struct {
