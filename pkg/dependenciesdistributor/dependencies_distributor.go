@@ -85,6 +85,27 @@ type LabelsKey struct {
 	Labels map[string]string
 }
 
+// labelsQueueKey is comparable and keeps distinct historical label snapshots.
+type labelsQueueKey struct {
+	keys.ClusterWideKey
+	Labels string
+}
+
+func resourceTemplateKeyFunc(obj any) (util.QueueKey, error) {
+	key, err := keys.ClusterWideKeyFunc(obj)
+	if err != nil {
+		return nil, err
+	}
+	metaInfo, err := meta.Accessor(obj)
+	if err != nil {
+		return nil, fmt.Errorf("object has no meta: %v", err)
+	}
+	return labelsQueueKey{
+		ClusterWideKey: key,
+		Labels:         labels.Set(metaInfo.GetLabels()).String(),
+	}, nil
+}
+
 // DependenciesDistributor is to automatically propagate relevant resources.
 // ResourceBinding will be created when a resource(e.g. deployment) is matched by a propagation policy,
 // we call it independent binding in DependenciesDistributor.
@@ -168,14 +189,23 @@ func (d *DependenciesDistributor) OnDelete(obj any) {
 // When the resource is confirmed to need to be distributed, it will be processed by DependenciesDistributor.Reconcile.
 // The key will be re-queued if an error is non-nil.
 func (d *DependenciesDistributor) reconcileResourceTemplate(key util.QueueKey) error {
-	resourceTemplateKey, ok := key.(*LabelsKey)
+	queueKey, ok := key.(labelsQueueKey)
 	if !ok {
 		klog.Error("Invalid key")
 		return fmt.Errorf("invalid key")
 	}
+	labelSnapshot, err := labels.ConvertSelectorToLabelsMap(queueKey.Labels)
+	if err != nil {
+		klog.ErrorS(err, "Invalid labels in dependency queue key")
+		return fmt.Errorf("invalid labels for resource %s: %w", queueKey.ClusterWideKey, err)
+	}
+	resourceTemplateKey := &LabelsKey{
+		ClusterWideKey: queueKey.ClusterWideKey,
+		Labels:         labelSnapshot,
+	}
 	klog.V(4).Infof("DependenciesDistributor start to reconcile object: %s", resourceTemplateKey)
 	readonlyBindingList := &workv1alpha2.ResourceBindingList{}
-	err := d.Client.List(context.TODO(), readonlyBindingList, &client.ListOptions{
+	err = d.Client.List(context.TODO(), readonlyBindingList, &client.ListOptions{
 		Namespace:             resourceTemplateKey.Namespace,
 		LabelSelector:         labels.Everything(),
 		UnsafeDisableDeepCopy: new(true),
@@ -662,21 +692,8 @@ func (d *DependenciesDistributor) createOrUpdateAttachedBinding(ctx context.Cont
 func (d *DependenciesDistributor) Start(ctx context.Context) error {
 	klog.Infof("Starting dependencies distributor.")
 	resourceWorkerOptions := util.Options{
-		Name: "dependencies resource detector",
-		KeyFunc: func(obj any) (util.QueueKey, error) {
-			key, err := keys.ClusterWideKeyFunc(obj)
-			if err != nil {
-				return nil, err
-			}
-			metaInfo, err := meta.Accessor(obj)
-			if err != nil { // should not happen
-				return nil, fmt.Errorf("object has no meta: %v", err)
-			}
-			return &LabelsKey{
-				ClusterWideKey: key,
-				Labels:         metaInfo.GetLabels(),
-			}, nil
-		},
+		Name:               "dependencies resource detector",
+		KeyFunc:            resourceTemplateKeyFunc,
 		ReconcileFunc:      d.reconcileResourceTemplate,
 		RateLimiterOptions: d.RateLimiterOptions,
 		UsePriorityQueue:   features.FeatureGate.Enabled(features.ControllerPriorityQueue),

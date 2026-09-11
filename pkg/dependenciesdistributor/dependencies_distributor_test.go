@@ -38,8 +38,10 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	configv1alpha1 "github.com/karmada-io/karmada/pkg/apis/config/v1alpha1"
@@ -312,6 +314,111 @@ func Test_OnUpdate(t *testing.T) {
 	}
 }
 
+func TestResourceTemplateQueueDeduplication(t *testing.T) {
+	tests := []struct {
+		name      string
+		first     map[string]string
+		second    map[string]string
+		otherName string
+		want      int
+	}{
+		{name: "identical labels", first: map[string]string{"a": "1", "b": "2"}, second: map[string]string{"b": "2", "a": "1"}, want: 1},
+		{name: "changed labels preserve both snapshots", first: map[string]string{"app": "old"}, second: map[string]string{"app": "new"}, want: 2},
+		{name: "nil and empty labels", second: map[string]string{}, want: 1},
+		{name: "empty label value differs from absent", first: map[string]string{"present": ""}, want: 2},
+		{name: "different objects", first: map[string]string{"app": "same"}, second: map[string]string{"app": "same"}, otherName: "other", want: 2},
+	}
+	for _, priority := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("%s/priority=%t", tt.name, priority), func(t *testing.T) {
+				var queue workqueue.TypedRateLimitingInterface[any]
+				if priority {
+					queue = priorityqueue.New[any]("")
+				} else {
+					queue = workqueue.NewTypedRateLimitingQueue(workqueue.NewTypedItemExponentialFailureRateLimiter[any](time.Millisecond, time.Second))
+				}
+				defer queue.ShutDown()
+				first := &corev1.Pod{
+					TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+					ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "pod", Labels: tt.first},
+				}
+				second := first.DeepCopy()
+				second.Labels = tt.second
+				if tt.otherName != "" {
+					second.Name = tt.otherName
+				}
+				for _, object := range []any{first, second} {
+					key, err := resourceTemplateKeyFunc(object)
+					if err != nil {
+						t.Fatal(err)
+					}
+					queue.Add(key)
+				}
+				if got := queue.Len(); got != tt.want {
+					t.Errorf("queue length = %d, want %d", got, tt.want)
+				}
+			})
+		}
+	}
+}
+
+func TestResourceTemplateQueuePreservesLabelSnapshot(t *testing.T) {
+	testScheme := runtime.NewScheme()
+	if err := workv1alpha2.Install(testScheme); err != nil {
+		t.Fatal(err)
+	}
+	binding := &workv1alpha2.ResourceBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "test",
+			Name:      "binding",
+			Annotations: map[string]string{
+				util.DependenciesAnnotationKey: `[{"apiVersion":"v1","kind":"Pod","namespace":"test","labelSelector":{"matchLabels":{"app":"old"}}}]`,
+			},
+		},
+	}
+	d := &DependenciesDistributor{
+		Client:       fake.NewClientBuilder().WithScheme(testScheme).WithObjects(binding).Build(),
+		genericEvent: make(chan event.TypedGenericEvent[*workv1alpha2.ResourceBinding], 2),
+	}
+	pod := &corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "pod", Labels: map[string]string{"app": "old"}},
+	}
+	oldKey, err := resourceTemplateKeyFunc(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod.Labels["app"] = "new"
+	if err := d.reconcileResourceTemplate(oldKey); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.genericEvent) != 1 {
+		t.Fatal("the queued old label snapshot no longer matches its dependent binding")
+	}
+	newKey, err := resourceTemplateKeyFunc(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.reconcileResourceTemplate(newKey); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.genericEvent) != 1 {
+		t.Fatal("the new label snapshot incorrectly matched the old selector")
+	}
+}
+
+func TestResourceTemplateQueueRejectsInvalidKeys(t *testing.T) {
+	d := &DependenciesDistributor{}
+	for _, key := range []util.QueueKey{"invalid", labelsQueueKey{Labels: "invalid selector"}} {
+		if err := d.reconcileResourceTemplate(key); err == nil {
+			t.Errorf("expected an error for invalid key %#v", key)
+		}
+	}
+	if _, err := resourceTemplateKeyFunc("not an object"); err == nil {
+		t.Error("expected invalid objects to fail key generation")
+	}
+}
+
 func Test_reconcileResourceTemplate(t *testing.T) {
 	type args struct {
 		key util.QueueKey
@@ -329,7 +436,7 @@ func Test_reconcileResourceTemplate(t *testing.T) {
 		{
 			name: "reconcile resource template",
 			args: args{
-				key: &LabelsKey{
+				key: labelsQueueKey{
 					ClusterWideKey: keys.ClusterWideKey{
 						Group:     "apps",
 						Version:   "v1",
@@ -337,9 +444,7 @@ func Test_reconcileResourceTemplate(t *testing.T) {
 						Name:      "demo-app",
 						Namespace: "test",
 					},
-					Labels: map[string]string{
-						"app": "test",
-					},
+					Labels: "app=test",
 				},
 			},
 			fields: fields{
