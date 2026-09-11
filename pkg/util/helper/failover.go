@@ -18,9 +18,9 @@ package helper
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/client-go/util/jsonpath"
 	"k8s.io/klog/v2"
 
@@ -51,6 +51,7 @@ func parseJSONValue(rawStatus []byte, jsonPath string) (string, error) {
 		return "", err
 	}
 	var unmarshalled any
+	// Preserve integer state such as checkpoint IDs without float64 rounding.
 	if err := json.Unmarshal(rawStatus, &unmarshalled); err != nil {
 		return "", fmt.Errorf("failed to unmarshal rawStatus: %w", err)
 	}

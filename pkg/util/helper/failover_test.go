@@ -52,6 +52,20 @@ func Test_BuildPreservedLabelState(t *testing.T) {
 			want:    map[string]string{"key-a": "2", "key-b": "true"},
 		},
 		{
+			name: "preserve exact integer checkpoint and offset",
+			args: args{
+				statePreservation: &policyv1alpha1.StatePreservation{
+					Rules: []policyv1alpha1.StatePreservationRule{
+						{AliasLabelName: "checkpoint-id", JSONPath: "{ .checkpoint }"},
+						{AliasLabelName: "offset", JSONPath: "{ .offset }"},
+					},
+				},
+				rawStatus: []byte(`{"checkpoint": 9007199254740993, "offset": 1000000}`),
+			},
+			wantErr: assert.NoError,
+			want:    map[string]string{"checkpoint-id": "9007199254740993", "offset": "1000000"},
+		},
+		{
 			name: "one statePreservation rule exist not found field",
 			args: args{
 				statePreservation: &policyv1alpha1.StatePreservation{
@@ -129,6 +143,42 @@ func Test_parseJSONValue(t *testing.T) {
 			},
 			wantErr: assert.NoError,
 			want:    "2",
+		},
+		{
+			name: "large integer is not rounded",
+			args: args{
+				rawStatus: []byte(`{"checkpoint": 9007199254740993}`),
+				jsonPath:  "{ .checkpoint }",
+			},
+			wantErr: assert.NoError,
+			want:    "9007199254740993",
+		},
+		{
+			name: "maximum int64 is preserved",
+			args: args{
+				rawStatus: []byte(`{"checkpoint": 9223372036854775807}`),
+				jsonPath:  "{ .checkpoint }",
+			},
+			wantErr: assert.NoError,
+			want:    "9223372036854775807",
+		},
+		{
+			name: "fractional value is preserved",
+			args: args{
+				rawStatus: []byte(`{"progress": 1.25}`),
+				jsonPath:  "{ .progress }",
+			},
+			wantErr: assert.NoError,
+			want:    "1.25",
+		},
+		{
+			name: "integer filter distinguishes adjacent large values",
+			args: args{
+				rawStatus: []byte(`{"items":[{"checkpoint":9007199254740992,"name":"old"},{"checkpoint":9007199254740993,"name":"new"}]}`),
+				jsonPath:  `{ .items[?(@.checkpoint==9007199254740993)].name }`,
+			},
+			wantErr: assert.NoError,
+			want:    "new",
 		},
 		// Build the following test cases in terms of what the function supports (which we don't use now).
 		// Please refer to Function Support: https://kubernetes.io/docs/reference/kubectl/jsonpath/
