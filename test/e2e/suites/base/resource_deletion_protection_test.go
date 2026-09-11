@@ -23,13 +23,71 @@ import (
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 
+	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/test/e2e/framework"
 	"github.com/karmada-io/karmada/test/helper"
 )
+
+var _ = framework.SerialDescribe("[resource deletion protection] Cluster API protection", func() {
+	ginkgo.It("protects individual and collection deletion until the label is removed", func() {
+		const testLabel = "e2e.karmada.io/deletion-protection"
+		name := "protected-cluster-" + rand.String(RandomStrLength)
+		cluster := &clusterv1alpha1.Cluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name,
+				Labels: map[string]string{
+					testLabel:                               name,
+					workv1alpha2.DeletionProtectionLabelKey: workv1alpha2.DeletionProtectionAlways,
+				},
+			},
+			Spec: clusterv1alpha1.ClusterSpec{SyncMode: clusterv1alpha1.Pull},
+		}
+		_, err := karmadaClient.ClusterV1alpha1().Clusters().Create(context.TODO(), cluster, metav1.CreateOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		waitForDeletion := func() {
+			gomega.Eventually(func() (bool, error) {
+				_, err := karmadaClient.ClusterV1alpha1().Clusters().Get(context.TODO(), name, metav1.GetOptions{})
+				if apierrors.IsNotFound(err) {
+					return true, nil
+				}
+				return false, err
+			}, pollTimeout, pollInterval).Should(gomega.BeTrue())
+		}
+		removeProtection := []byte(`{"metadata":{"labels":{"resourcetemplate.karmada.io/deletion-protected":null}}}`)
+		ginkgo.DeferCleanup(func() {
+			_, err := karmadaClient.ClusterV1alpha1().Clusters().Patch(context.TODO(), name, types.MergePatchType, removeProtection, metav1.PatchOptions{})
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			err = karmadaClient.ClusterV1alpha1().Clusters().Delete(context.TODO(), name, metav1.DeleteOptions{})
+			gomega.Expect(apierrors.IsNotFound(err) || err == nil).To(gomega.BeTrue())
+			waitForDeletion()
+		})
+
+		err = karmadaClient.ClusterV1alpha1().Clusters().Delete(context.TODO(), name, metav1.DeleteOptions{})
+		gomega.Expect(apierrors.IsForbidden(err)).To(gomega.BeTrue())
+		options := metav1.ListOptions{LabelSelector: labels.Set{testLabel: name}.String()}
+		err = karmadaClient.ClusterV1alpha1().Clusters().DeleteCollection(context.TODO(), metav1.DeleteOptions{}, options)
+		gomega.Expect(apierrors.IsForbidden(err)).To(gomega.BeTrue())
+		current, err := karmadaClient.ClusterV1alpha1().Clusters().Get(context.TODO(), name, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(current.DeletionTimestamp.IsZero()).To(gomega.BeTrue())
+
+		_, err = karmadaClient.ClusterV1alpha1().Clusters().Patch(context.TODO(), name, types.MergePatchType, removeProtection, metav1.PatchOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err = karmadaClient.ClusterV1alpha1().Clusters().DeleteCollection(context.TODO(), metav1.DeleteOptions{}, options)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		waitForDeletion()
+	})
+})
 
 var _ = ginkgo.Describe("[resource deletion protection] deletion protection testing", func() {
 	var deploymentName, namespaceName string

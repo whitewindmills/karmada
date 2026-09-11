@@ -23,6 +23,8 @@ import (
 	"net/url"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/registry/generic"
@@ -34,6 +36,7 @@ import (
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 
 	clusterapis "github.com/karmada-io/karmada/pkg/apis/cluster"
+	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/pkg/printers"
 	printersinternal "github.com/karmada-io/karmada/pkg/printers/internalversion"
 	printerstorage "github.com/karmada-io/karmada/pkg/printers/storage"
@@ -105,6 +108,37 @@ type REST struct {
 
 // Implement Redirector.
 var _ = rest.Redirector(&REST{})
+
+var _ rest.GracefulDeleter = &REST{}
+var _ rest.CollectionDeleter = &REST{}
+
+// Delete applies Cluster deletion validation before removing an individual object.
+func (r *REST) Delete(ctx context.Context, name string, deleteValidation rest.ValidateObjectFunc, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
+	return r.Store.Delete(ctx, name, withDeletionProtection(deleteValidation), options)
+}
+
+// DeleteCollection applies Cluster deletion validation to every selected object.
+func (r *REST) DeleteCollection(ctx context.Context, deleteValidation rest.ValidateObjectFunc, options *metav1.DeleteOptions, listOptions *metainternalversion.ListOptions) (runtime.Object, error) {
+	return r.Store.DeleteCollection(ctx, withDeletionProtection(deleteValidation), options, listOptions)
+}
+
+func withDeletionProtection(validation rest.ValidateObjectFunc) rest.ValidateObjectFunc {
+	return func(ctx context.Context, obj runtime.Object) error {
+		cluster, ok := obj.(*clusterapis.Cluster)
+		if !ok || cluster == nil {
+			return fmt.Errorf("expected a non-nil Cluster for deletion, got %T", obj)
+		}
+		if cluster.Labels[workv1alpha2.DeletionProtectionLabelKey] == workv1alpha2.DeletionProtectionAlways {
+			// Keep the established deletion-protection webhook wording.
+			err := fmt.Errorf("This resource is protected, please make sure to remove the label: %s", workv1alpha2.DeletionProtectionLabelKey) //nolint:staticcheck
+			return apierrors.NewForbidden(clusterapis.Resource("clusters"), cluster.Name, err)
+		}
+		if validation != nil {
+			return validation(ctx, obj)
+		}
+		return nil
+	}
+}
 
 // ResourceLocation returns a URL to which one can send traffic for the specified cluster.
 func (r *REST) ResourceLocation(ctx context.Context, name string) (*url.URL, http.RoundTripper, error) {
