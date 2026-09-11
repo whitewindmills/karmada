@@ -68,6 +68,36 @@ func TestValidateLoadBalancerClass(t *testing.T) {
 	}
 }
 
+func TestValidateETCDReplicaCount(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		replicas *int32
+		wantErr  bool
+	}{
+		{name: "negative odd", replicas: new(int32(-1)), wantErr: true},
+		{name: "negative even", replicas: new(int32(-2)), wantErr: true},
+		{name: "explicit zero", replicas: new(int32(0))},
+		{name: "single member", replicas: new(int32(1))},
+		{name: "multiple members", replicas: new(int32(3))},
+		{name: "not defaulted yet"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			etcd := &operatorv1alpha1.Etcd{Local: &operatorv1alpha1.LocalEtcd{
+				CommonSettings: operatorv1alpha1.CommonSettings{Replicas: tt.replicas},
+			}}
+			errs := validateETCD(etcd, "karmada", field.NewPath("spec", "components", "etcd"))
+			if (len(errs) != 0) != tt.wantErr {
+				t.Fatalf("validation errors = %v, want error = %v", errs, tt.wantErr)
+			}
+			for _, err := range errs {
+				if err.Field != "spec.components.etcd.local.replicas" {
+					t.Errorf("unexpected field path: %s", err.Field)
+				}
+			}
+		})
+	}
+}
+
 func Test_validate(t *testing.T) {
 	karmadaType := metav1.TypeMeta{Kind: "Karmada", APIVersion: "operator.karmada.io/v1alpha1"}
 	testObj := metav1.ObjectMeta{Name: "test", Namespace: "test"}
