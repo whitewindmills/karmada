@@ -156,6 +156,41 @@ func TestInternetIP(t *testing.T) {
 	}
 }
 
+func TestInternetIPResponseValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		wantIP string
+	}{
+		{name: "IPv4 whitespace", status: http.StatusOK, body: " 203.0.113.42\r\n", wantIP: "203.0.113.42"},
+		{name: "IPv6 whitespace", status: http.StatusOK, body: "2001:db8::1\n", wantIP: "2001:db8::1"},
+		{name: "HTTP error with IP-looking body", status: http.StatusServiceUnavailable, body: "203.0.113.42"},
+		{name: "invalid response", status: http.StatusOK, body: "not an IP address"},
+		{name: "empty response", status: http.StatusOK},
+		{name: "oversized response", status: http.StatusOK, body: strings.Repeat(" ", MaxRespBodyLength) + "x"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			originalTransport := http.DefaultTransport
+			http.DefaultTransport = internetIPTestTransport(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tt.status,
+					Body:       io.NopCloser(strings.NewReader(tt.body)),
+				}, nil
+			})
+			t.Cleanup(func() { http.DefaultTransport = originalTransport })
+			got, err := InternetIP()
+			if tt.wantIP == "" {
+				if err == nil || got != nil {
+					t.Errorf("invalid IP response produced (%v, %v), want no IP and an error", got, err)
+				}
+			} else if err != nil || !got.Equal(net.ParseIP(tt.wantIP)) {
+				t.Errorf("InternetIP() = (%v, %v), want %s", got, err, tt.wantIP)
+			}
+		})
+	}
+}
+
 func TestInternetIPBodyReadIsBounded(t *testing.T) {
 	originalTransport := http.DefaultTransport
 	http.DefaultTransport = internetIPTestTransport(func(request *http.Request) (*http.Response, error) {

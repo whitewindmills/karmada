@@ -75,13 +75,23 @@ func InternetIP() (net.IP, error) {
 	}
 
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("public IP lookup returned HTTP status %d", resp.StatusCode)
+	}
 
-	content, err := io.ReadAll(io.LimitReader(resp.Body, MaxRespBodyLength))
+	content, err := io.ReadAll(io.LimitReader(resp.Body, MaxRespBodyLength+1))
 	if err != nil {
 		return nil, err
 	}
+	if len(content) > MaxRespBodyLength {
+		return nil, fmt.Errorf("public IP response exceeds %d bytes", MaxRespBodyLength)
+	}
 
-	return StringToNetIP(string(content)), nil
+	ip := net.ParseIP(strings.TrimSpace(string(content)))
+	if ip == nil {
+		return nil, fmt.Errorf("public IP service returned an invalid IP address")
+	}
+	return ip, nil
 }
 
 // FileToBytes File Conversion Bytes
