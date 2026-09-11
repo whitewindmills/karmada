@@ -94,28 +94,9 @@ func InternetIP() (net.IP, error) {
 	return ip, nil
 }
 
-// FileToBytes File Conversion Bytes
+// FileToBytes reads the complete file without relying on its reported size.
 func FileToBytes(path, name string) ([]byte, error) {
-	filename := filepath.Join(path, name)
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	stats, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-
-	data := make([]byte, stats.Size())
-
-	_, err = file.Read(data)
-	if err != nil {
-		return nil, err
-	}
-
-	return data, nil
+	return os.ReadFile(filepath.Join(path, name))
 }
 
 // BytesToFile Bytes Conversion File
