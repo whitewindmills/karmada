@@ -26,7 +26,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -268,15 +267,17 @@ func (c *RebalancerController) updateWorkloadRebalancerStatus(ctx context.Contex
 	modifiedRebalancer := rebalancer.DeepCopy()
 	modifiedRebalancer.Status = *newStatus
 
-	return retry.RetryOnConflict(retry.DefaultRetry, func() (err error) {
-		klog.V(4).InfoS("Start to patch WorkloadRebalancer status", "workloadRebalancer", rebalancer.Name)
-		if err = c.Client.Status().Patch(ctx, modifiedRebalancer, client.MergeFrom(rebalancer)); err != nil {
-			klog.ErrorS(err, "Failed to patch WorkloadRebalancer status", "workloadRebalancer", rebalancer.Name)
-			return err
-		}
-		klog.V(4).InfoS("Patch WorkloadRebalancer successful", "workloadRebalancer", rebalancer.Name)
-		return nil
-	})
+	// Lock the status patch to the reconciled version so TTL cleanup cannot
+	// delete a concurrent spec update that has not been processed.
+	patch := client.MergeFromWithOptions(rebalancer, client.MergeFromWithOptimisticLock{})
+	klog.V(4).InfoS("Start to patch WorkloadRebalancer status", "workloadRebalancer", rebalancer.Name)
+	if err := c.Client.Status().Patch(ctx, modifiedRebalancer, patch); err != nil {
+		klog.ErrorS(err, "Failed to patch WorkloadRebalancer status", "workloadRebalancer", rebalancer.Name)
+		return err
+	}
+	rebalancer.ResourceVersion = modifiedRebalancer.ResourceVersion
+	klog.V(4).InfoS("Patch WorkloadRebalancer successful", "workloadRebalancer", rebalancer.Name)
+	return nil
 }
 
 func (c *RebalancerController) deleteWorkloadRebalancer(ctx context.Context, rebalancer *appsv1alpha1.WorkloadRebalancer) error {

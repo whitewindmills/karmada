@@ -34,6 +34,7 @@ import (
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	appsv1alpha1 "github.com/karmada-io/karmada/pkg/apis/apps/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
@@ -291,6 +292,113 @@ func TestRebalancerController_Reconcile(t *testing.T) {
 	}
 }
 
+func TestRebalancerController_ReconcileImmediateCleanup(t *testing.T) {
+	for _, bindingExists := range []bool{true, false} {
+		t.Run(fmt.Sprintf("bindingExists=%t", bindingExists), func(t *testing.T) {
+			deployment := helper.NewDeployment("test-ns", "immediate-cleanup")
+			rebalancer := &appsv1alpha1.WorkloadRebalancer{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "immediate-cleanup",
+					CreationTimestamp: metav1.Now(),
+					Generation:        1,
+				},
+				Spec: appsv1alpha1.WorkloadRebalancerSpec{
+					Workloads:               []appsv1alpha1.ObjectReference{newObjectReference(deployment)},
+					TTLSecondsAfterFinished: ptr.To[int32](0),
+				},
+			}
+			objects := []client.Object{rebalancer}
+			if bindingExists {
+				objects = append(objects, newResourceBinding(deployment))
+			}
+			c := &RebalancerController{
+				Client: fake.NewClientBuilder().WithScheme(gclient.NewSchema()).
+					WithObjects(objects...).WithStatusSubresource(rebalancer).Build(),
+			}
+			key := client.ObjectKeyFromObject(rebalancer)
+			result, err := c.Reconcile(context.Background(), controllerruntime.Request{NamespacedName: key})
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v, want immediate cleanup without a retry", err)
+			}
+			if result != (controllerruntime.Result{}) {
+				t.Fatalf("Reconcile() result = %+v, want no requeue", result)
+			}
+			if err := c.Client.Get(context.Background(), key, &appsv1alpha1.WorkloadRebalancer{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("get WorkloadRebalancer after cleanup error = %v, want NotFound", err)
+			}
+		})
+	}
+}
+
+func TestRebalancerController_ReconcileConcurrentSpecUpdate(t *testing.T) {
+	ctx := context.Background()
+	deployment := helper.NewDeployment("test-ns", "concurrent-update")
+	rebalancer := &appsv1alpha1.WorkloadRebalancer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "concurrent-update",
+			CreationTimestamp: metav1.Now(),
+			Generation:        1,
+		},
+		Spec: appsv1alpha1.WorkloadRebalancerSpec{
+			Workloads:               []appsv1alpha1.ObjectReference{newObjectReference(deployment)},
+			TTLSecondsAfterFinished: ptr.To[int32](0),
+		},
+	}
+	addedDeployment := helper.NewDeployment("test-ns", "added-workload")
+	updated := false
+	c := &RebalancerController{
+		Client: fake.NewClientBuilder().WithScheme(gclient.NewSchema()).
+			WithObjects(rebalancer, newResourceBinding(deployment), newResourceBinding(addedDeployment)).
+			WithStatusSubresource(rebalancer).
+			WithInterceptorFuncs(interceptor.Funcs{
+				SubResourcePatch: func(ctx context.Context, c client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					if !updated {
+						latest := &appsv1alpha1.WorkloadRebalancer{}
+						if err := c.Get(ctx, client.ObjectKeyFromObject(obj), latest); err != nil {
+							return err
+						}
+						latest.Spec.Workloads = append(latest.Spec.Workloads, newObjectReference(addedDeployment))
+						latest.Generation++
+						if err := c.Update(ctx, latest); err != nil {
+							return err
+						}
+						updated = true
+					}
+					return c.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+				},
+			}).Build(),
+	}
+	key := client.ObjectKeyFromObject(rebalancer)
+	req := controllerruntime.Request{NamespacedName: key}
+	if _, err := c.Reconcile(ctx, req); !apierrors.IsConflict(err) {
+		t.Fatalf("Reconcile() error = %v, want Conflict for the concurrent spec update", err)
+	}
+	latest := &appsv1alpha1.WorkloadRebalancer{}
+	if err := c.Client.Get(ctx, key, latest); err != nil {
+		t.Fatalf("get WorkloadRebalancer after concurrent update: %v", err)
+	}
+	if latest.Status.ObservedGeneration != 0 || latest.Status.FinishTime != nil || len(latest.Status.ObservedWorkloads) != 0 {
+		t.Fatalf("stale status was published after the spec changed: %+v", latest.Status)
+	}
+	if len(latest.Spec.Workloads) != 2 {
+		t.Fatalf("concurrent workload addition was lost: %+v", latest.Spec.Workloads)
+	}
+
+	if _, err := c.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile() retry error = %v", err)
+	}
+	addedBinding := &workv1alpha2.ResourceBinding{}
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(newResourceBinding(addedDeployment)), addedBinding); err != nil {
+		t.Fatalf("get added workload binding: %v", err)
+	}
+	if !addedBinding.Spec.RescheduleTriggeredAt.Equal(&latest.CreationTimestamp) {
+		t.Fatalf("added workload was not rebalanced before cleanup: %+v", addedBinding.Spec.RescheduleTriggeredAt)
+	}
+	if err := c.Client.Get(ctx, key, latest); !apierrors.IsNotFound(err) {
+		t.Fatalf("get WorkloadRebalancer after retry error = %v, want NotFound", err)
+	}
+}
+
 func runRebalancerTest(t *testing.T, tt struct {
 	name                string
 	req                 controllerruntime.Request
@@ -410,7 +518,11 @@ func TestRebalancerController_updateWorkloadRebalancerStatus(t *testing.T) {
 					WithStatusSubresource(tt.rebalancer, tt.modifiedRebalancer).Build(),
 			}
 			wantStatus := tt.modifiedRebalancer.Status
-			err := c.updateWorkloadRebalancerStatus(context.TODO(), tt.rebalancer, &wantStatus)
+			rebalancer := &appsv1alpha1.WorkloadRebalancer{}
+			if err := c.Client.Get(context.TODO(), client.ObjectKeyFromObject(tt.rebalancer), rebalancer); err != nil {
+				t.Fatalf("get WorkloadRebalancer failed: %+v", err)
+			}
+			err := c.updateWorkloadRebalancerStatus(context.TODO(), rebalancer, &wantStatus)
 			if (err == nil && tt.wantErr) || (err != nil && !tt.wantErr) {
 				t.Fatalf("updateWorkloadRebalancerStatus() error = %v, wantErr %v", err, tt.wantErr)
 			}
