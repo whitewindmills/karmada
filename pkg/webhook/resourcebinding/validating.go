@@ -27,6 +27,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -339,6 +340,9 @@ func buildDenyResponse(err error) admission.Response {
 }
 
 func (v *ValidatingAdmission) calculateRBUsages(rb, oldRB *workv1alpha2.ResourceBinding) (corev1.ResourceList, corev1.ResourceList, error) {
+	if err := validateQuotaInputs(&rb.Spec, field.NewPath("spec")); err != nil {
+		return nil, nil, err
+	}
 	newRbTotalUsage := helper.CalculateResourceUsage(rb)
 	klog.V(4).Infof("Calculated total usage for incoming RB %s/%s: %v", rb.Namespace, rb.Name, newRbTotalUsage)
 
@@ -348,6 +352,38 @@ func (v *ValidatingAdmission) calculateRBUsages(rb, oldRB *workv1alpha2.Resource
 		klog.V(4).Infof("Calculated total usage for old RB %s/%s: %v", oldRB.Namespace, oldRB.Name, oldRbTotalUsage)
 	}
 	return newRbTotalUsage, oldRbTotalUsage, nil
+}
+
+func validateQuotaInputs(spec *workv1alpha2.ResourceBindingSpec, path *field.Path) error {
+	var errs field.ErrorList
+	// Validate requested usage, not the delta: valid scale-downs must still release quota.
+	if len(spec.Components) > 0 {
+		for i, component := range spec.Components {
+			componentPath := path.Child("components").Index(i)
+			errs = append(errs, apivalidation.ValidateNonnegativeField(int64(component.Replicas), componentPath.Child("replicas"))...)
+			if component.ReplicaRequirements != nil {
+				errs = append(errs, validateNonnegativeResourceRequests(component.ReplicaRequirements.ResourceRequest,
+					componentPath.Child("replicaRequirements", "resourceRequest"))...)
+			}
+		}
+	} else if spec.ReplicaRequirements != nil {
+		for i, cluster := range spec.Clusters {
+			errs = append(errs, apivalidation.ValidateNonnegativeField(int64(cluster.Replicas), path.Child("clusters").Index(i).Child("replicas"))...)
+		}
+		errs = append(errs, validateNonnegativeResourceRequests(spec.ReplicaRequirements.ResourceRequest,
+			path.Child("replicaRequirements", "resourceRequest"))...)
+	}
+	return errs.ToAggregate()
+}
+
+func validateNonnegativeResourceRequests(requests corev1.ResourceList, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	for name, quantity := range requests {
+		if quantity.Sign() < 0 {
+			errs = append(errs, field.Invalid(path.Key(string(name)), quantity.String(), apivalidation.IsNegativeErrorMsg))
+		}
+	}
+	return errs
 }
 
 func (v *ValidatingAdmission) listFRQs(ctx context.Context, namespace string) (*policyv1alpha1.FederatedResourceQuotaList, error) {

@@ -81,6 +81,84 @@ func TestInvalidComponentsDoNotReserveQuota(t *testing.T) {
 	}
 }
 
+func TestNegativeUsageInputsDoNotReleaseQuota(t *testing.T) {
+	originalGates := features.FeatureGate.DeepCopy()
+	t.Cleanup(func() { features.FeatureGate = originalGates })
+	require.NoError(t, features.FeatureGate.Set(fmt.Sprintf("%s=true,%s=true",
+		features.FederatedQuotaEnforcement, features.MultiplePodTemplatesScheduling)))
+
+	for _, tt := range []struct {
+		name      string
+		component bool
+		replicas  int32
+		cpu       string
+		field     string
+		allowed   bool
+	}{
+		{name: "scheduled replicas", replicas: -1, cpu: "100m", field: "spec.clusters[0].replicas"},
+		{name: "replica quantity", replicas: 1, cpu: "-100m", field: "spec.replicaRequirements.resourceRequest[cpu]"},
+		{name: "component replicas", component: true, replicas: -1, cpu: "100m", field: "spec.components[0].replicas"},
+		{name: "component quantity", component: true, replicas: 1, cpu: "-100m", field: "spec.components[0].replicaRequirements.resourceRequest[cpu]"},
+		{name: "zero replicas", replicas: 0, cpu: "100m", allowed: true},
+		{name: "zero quantity", replicas: 1, cpu: "0", allowed: true},
+		{name: "zero component replicas", component: true, replicas: 0, cpu: "100m", allowed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(tt.cpu)}
+			binding := makeTestRB("default", "binding",
+				WithClusters([]workv1alpha2.TargetCluster{{Name: "member", Replicas: tt.replicas}}),
+				WithReplicaRequirements(requests))
+			if tt.component {
+				binding.Spec.ReplicaRequirements = nil
+				binding.Spec.Clusters[0].Replicas = 0
+				binding.Spec.Components = []workv1alpha2.Component{{
+					Name: "component", Replicas: tt.replicas,
+					ReplicaRequirements: &workv1alpha2.ComponentReplicaRequirements{ResourceRequest: requests},
+				}}
+			}
+			quota := makeTestFRQ("default", "quota",
+				WithOverallLimits(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}),
+				WithOverallUsed(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")}))
+			c := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(quota).WithStatusSubresource(quota).Build()
+			validator := &ValidatingAdmission{Client: c, Decoder: &fakeDecoder{decodeObj: binding}}
+			response := validator.Handle(t.Context(),
+				newAdmissionRequestBuilder(t, admissionv1.Create, binding.Namespace, binding.Name, "negative-usage").
+					WithObject(binding).Build())
+			assert.Equal(t, tt.allowed, response.Allowed, "negative requested usage must not be treated as a quota release")
+			require.NotNil(t, response.Result)
+			if tt.field != "" {
+				assert.Contains(t, response.Result.Message, tt.field)
+			}
+			actual := &policyv1alpha1.FederatedResourceQuota{}
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(quota), actual))
+			assert.Equal(t, quota.Status, actual.Status, "invalid requests must leave reservations unchanged")
+		})
+	}
+}
+
+func TestNonnegativeQuotaInputsPermitScaleDown(t *testing.T) {
+	originalGates := features.FeatureGate.DeepCopy()
+	t.Cleanup(func() { features.FeatureGate = originalGates })
+	require.NoError(t, features.FeatureGate.Set(fmt.Sprintf("%s=true", features.FederatedQuotaEnforcement)))
+	oldBinding := makeTestRB("default", "binding",
+		WithClusters([]workv1alpha2.TargetCluster{{Name: "member", Replicas: 2}}),
+		WithReplicaRequirements(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}))
+	binding := oldBinding.DeepCopy()
+	binding.Spec.Clusters[0].Replicas = 1
+	quota := makeTestFRQ("default", "quota",
+		WithOverallLimits(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}),
+		WithOverallUsed(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")}))
+	c := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(quota).WithStatusSubresource(quota).Build()
+	validator := &ValidatingAdmission{Client: c, Decoder: &fakeDecoder{decodeObj: binding, rawDecodedObj: oldBinding}}
+	response := validator.Handle(t.Context(),
+		newAdmissionRequestBuilder(t, admissionv1.Update, binding.Namespace, binding.Name, "scale-down").
+			WithObject(binding).WithOldObject(oldBinding).Build())
+	require.True(t, response.Allowed, "%+v", response.Result)
+	actual := &policyv1alpha1.FederatedResourceQuota{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(quota), actual))
+	assert.True(t, actual.Status.OverallUsed.Cpu().Equal(resource.MustParse("100m")), "valid scale-down must release its actual usage")
+}
+
 func TestQuotaConflictRetryDoesNotReapplyCommittedDeltas(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
