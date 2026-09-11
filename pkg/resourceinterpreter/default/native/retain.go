@@ -37,13 +37,42 @@ func getAllDefaultRetentionInterpreter() map[schema.GroupVersionKind]retentionIn
 	s := make(map[schema.GroupVersionKind]retentionInterpreter)
 	s[appsv1.SchemeGroupVersion.WithKind(util.DeploymentKind)] = retainWorkloadReplicas
 	s[corev1.SchemeGroupVersion.WithKind(util.PodKind)] = retainPodFields
-	s[corev1.SchemeGroupVersion.WithKind(util.ServiceKind)] = lifted.RetainServiceFields
+	s[corev1.SchemeGroupVersion.WithKind(util.ServiceKind)] = retainServiceFields
 	s[corev1.SchemeGroupVersion.WithKind(util.ServiceAccountKind)] = lifted.RetainServiceAccountFields
 	s[corev1.SchemeGroupVersion.WithKind(util.PersistentVolumeClaimKind)] = retainPersistentVolumeClaimFields
 	s[corev1.SchemeGroupVersion.WithKind(util.PersistentVolumeKind)] = retainPersistentVolumeFields
 	s[batchv1.SchemeGroupVersion.WithKind(util.JobKind)] = retainJobSelectorFields
 	s[corev1.SchemeGroupVersion.WithKind(util.SecretKind)] = retainSecretServiceAccountToken
 	return s
+}
+
+func retainServiceFields(desired, observed *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	if _, err := lifted.RetainServiceFields(desired, observed); err != nil {
+		return nil, err
+	}
+	desiredService, observedService := &corev1.Service{}, &corev1.Service{}
+	if err := helper.ConvertToTypedObject(desired, desiredService); err != nil {
+		return nil, fmt.Errorf("failed to convert desired Service: %w", err)
+	}
+	if desiredService.Spec.Type != corev1.ServiceTypeNodePort && desiredService.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		return desired, nil
+	}
+	if err := helper.ConvertToTypedObject(observed, observedService); err != nil {
+		return nil, fmt.Errorf("failed to convert observed Service: %w", err)
+	}
+	for i := range desiredService.Spec.Ports {
+		port := &desiredService.Spec.Ports[i]
+		if port.NodePort != 0 {
+			continue
+		}
+		for _, observedPort := range observedService.Spec.Ports {
+			if port.Name == observedPort.Name && port.Protocol == observedPort.Protocol {
+				port.NodePort = observedPort.NodePort
+				break
+			}
+		}
+	}
+	return helper.ToUnstructured(desiredService)
 }
 
 func retainPodFields(desired, observed *unstructured.Unstructured) (*unstructured.Unstructured, error) {

@@ -183,7 +183,8 @@ func removeServiceAccountIrrelevantField(workload *unstructured.Unstructured) er
 	return nil
 }
 
-// removeServiceIrrelevantField removes member cluster specific fields from Service (e.g. clusterIP, clusterIPs)
+// removeServiceIrrelevantField removes cluster-local IP and node-port allocations.
+// Fixed member node ports can be supplied by an override after pruning.
 func removeServiceIrrelevantField(workload *unstructured.Unstructured) error {
 	// In the case spec.clusterIP is set to `None`, means user want a headless service,  then it shouldn't be removed.
 	clusterIP, exist, _ := unstructured.NestedString(workload.Object, "spec", "clusterIP")
@@ -191,7 +192,22 @@ func removeServiceIrrelevantField(workload *unstructured.Unstructured) error {
 		unstructured.RemoveNestedField(workload.Object, "spec", "clusterIP")
 		unstructured.RemoveNestedField(workload.Object, "spec", "clusterIPs")
 	}
-	return nil
+	unstructured.RemoveNestedField(workload.Object, "spec", "healthCheckNodePort")
+	ports, found, err := unstructured.NestedSlice(workload.Object, "spec", "ports")
+	if err != nil {
+		return fmt.Errorf("failed to read service ports: %w", err)
+	}
+	if !found {
+		return nil
+	}
+	for i, item := range ports {
+		port, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("service port %d must be an object, got %T", i, item)
+		}
+		delete(port, "nodePort")
+	}
+	return unstructured.SetNestedSlice(workload.Object, ports, "spec", "ports")
 }
 
 // removeSecretIrrelevantField removes the data and service-account uid annotation from service-account token secrets managed by member-cluster controller-manager
