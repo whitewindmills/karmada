@@ -18,6 +18,8 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
+bash "$(dirname "${BASH_SOURCE[0]}")/verify-gopath-cache.sh"
+
 KARMADA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 _tmp="${KARMADA_ROOT}/_tmp"
 ESTIMATORPB="pkg/estimator/pb"

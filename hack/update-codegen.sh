@@ -43,7 +43,7 @@ cleanup
 
 source "${REPO_ROOT}"/hack/util.sh
 util:create_gopath_tree "${REPO_ROOT}" "${go_path}"
-export GOPATH="${go_path}"
+util::set_gopath "${go_path}"
 
 echo "Generating with deepcopy-gen"
 deepcopy-gen \
@@ -331,4 +331,3 @@ informer-gen \
   --output-pkg=github.com/karmada-io/karmada/operator/pkg/generated/informers \
   --output-dir=operator/pkg/generated/informers \
   github.com/karmada-io/karmada/operator/pkg/apis/operator/v1alpha1
-

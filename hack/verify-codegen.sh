@@ -20,6 +20,8 @@ set -o pipefail
 
 SCRIPT_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
 
+bash "${SCRIPT_ROOT}/hack/verify-gopath-cache.sh"
+
 DIFFROOT="${SCRIPT_ROOT}/pkg"
 TMP_DIFFROOT="${SCRIPT_ROOT}/_tmp/pkg"
 DIFFEXAMPLES="${SCRIPT_ROOT}/examples/customresourceinterpreter/apis"

@@ -801,6 +801,14 @@ function util::version_ldflags() {
   echo $LDFLAGS
 }
 
+# util::set_gopath switches a generator's GOPATH without moving its module/toolchain cache.
+function util::set_gopath() {
+  local module_cache
+  module_cache=$(go env GOMODCACHE)
+  export GOMODCACHE="${module_cache}"
+  export GOPATH="$1"
+}
+
 # util::create_gopath_tree create the GOPATH tree
 # Parameters:
 #  - $1: the root path of repo

@@ -131,7 +131,7 @@ setup_protoc
 
 source "${KARMADA_ROOT}"/hack/util.sh
 util:create_gopath_tree "${KARMADA_ROOT}" "${go_path}"
-export GOPATH="${go_path}"
+util::set_gopath "${go_path}"
 
 # https://github.com/kubernetes/kubernetes/blob/release-1.23/hack/update-generated-protobuf-dockerized.sh
 if [[ -z "$(command -v protoc)" || "$(protoc --version 2>/dev/null)" != libprotoc\ ${PROTOC_VERSION}* ]]; then
