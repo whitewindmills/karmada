@@ -62,7 +62,7 @@ func (c *CronFHPAController) Reconcile(ctx context.Context, req controllerruntim
 	if err := c.Client.Get(ctx, req.NamespacedName, cronFHPA); err != nil {
 		if apierrors.IsNotFound(err) {
 			klog.V(4).InfoS("Begin to cleanup the cron jobs for CronFederatedHPA", "namespace", req.Namespace, "name", req.Name)
-			c.CronHandler.StopCronFHPAExecutor(req.NamespacedName.String())
+			c.CronHandler.ForgetCronFHPA(req.NamespacedName.String())
 			return controllerruntime.Result{}, nil
 		}
 
@@ -72,7 +72,7 @@ func (c *CronFHPAController) Reconcile(ctx context.Context, req controllerruntim
 
 	//  If this CronFederatedHPA is deleting, stop all related cron executors
 	if !cronFHPA.DeletionTimestamp.IsZero() {
-		c.CronHandler.StopCronFHPAExecutor(req.NamespacedName.String())
+		c.CronHandler.ForgetCronFHPA(req.NamespacedName.String())
 		return controllerruntime.Result{}, nil
 	}
 

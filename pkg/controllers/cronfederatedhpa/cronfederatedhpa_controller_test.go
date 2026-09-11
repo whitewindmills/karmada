@@ -85,6 +85,72 @@ func TestReconcileReplacesExecutorsOnlyOnTargetChange(t *testing.T) {
 	}
 }
 
+func TestReconcileForgetsDeletedScaleTargets(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		finalizers   []string
+		stopExecutor bool
+	}{
+		{name: "not found"},
+		{name: "deletion in progress", finalizers: []string{"example.com/cleanup"}},
+		{name: "executor already stopped", stopExecutor: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rule := autoscalingv1alpha1.CronFederatedHPARule{
+				Name: "scale", Schedule: "0 0 1 1 *", TargetReplicas: new(int32(3)),
+			}
+			cron := &autoscalingv1alpha1.CronFederatedHPA{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default", Finalizers: tt.finalizers},
+				Spec: autoscalingv1alpha1.CronFederatedHPASpec{
+					ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{APIVersion: "apps/v1", Kind: "Deployment", Name: "workload"},
+					Rules:          []autoscalingv1alpha1.CronFederatedHPARule{rule},
+				},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithObjects(cron).WithStatusSubresource(cron).Build()
+			recorder := record.NewFakeRecorder(10)
+			handler := NewCronHandler(fakeClient, recorder)
+			key := helper.GetCronFederatedHPAKey(cron)
+			defer handler.StopCronFHPAExecutor(key)
+			handler.CronFHPAScaleTargetRefUpdates("default/other", cron.Spec.ScaleTargetRef)
+			controller := &CronFHPAController{Client: fakeClient, EventRecorder: recorder, CronHandler: handler}
+			request := controllerruntime.Request{NamespacedName: client.ObjectKeyFromObject(cron)}
+			if _, err := controller.Reconcile(t.Context(), request); err != nil {
+				t.Fatal(err)
+			}
+			handler.executorLock.RLock()
+			executor := handler.cronExecutorMap[key][rule.Name]
+			handler.executorLock.RUnlock()
+			if tt.stopExecutor {
+				handler.StopCronFHPAExecutor(key)
+			}
+			if err := fakeClient.Get(t.Context(), request.NamespacedName, cron); err != nil {
+				t.Fatal(err)
+			}
+			if err := fakeClient.Delete(t.Context(), cron); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if _, err := controller.Reconcile(t.Context(), request); err != nil {
+					t.Fatal(err)
+				}
+				handler.scaleTargetLock.RLock()
+				_, retained := handler.cronFHPAScaleTargetMap[key]
+				_, otherRetained := handler.cronFHPAScaleTargetMap["default/other"]
+				handler.scaleTargetLock.RUnlock()
+				if retained {
+					t.Error("deleted CronFederatedHPA still has a cached scale target")
+				}
+				if !otherRetained {
+					t.Error("cleanup removed another CronFederatedHPA's scale target")
+				}
+				if executor.Scheduler.IsRunning() {
+					t.Error("deleted CronFederatedHPA still has a running executor")
+				}
+			}
+		})
+	}
+}
+
 func TestReconcileRollsBackExecutorOnHistoryFailure(t *testing.T) {
 	for _, removeRule := range []bool{false, true} {
 		name := "retry persists history"

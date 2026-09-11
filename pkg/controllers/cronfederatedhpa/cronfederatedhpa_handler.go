@@ -128,6 +128,15 @@ func (c *CronHandler) StopCronFHPAExecutor(cronFHPAKey string) {
 	delete(c.cronExecutorMap, cronFHPAKey)
 }
 
+// ForgetCronFHPA stops its executors and removes the scale target of a deleted CronFederatedHPA.
+func (c *CronHandler) ForgetCronFHPA(cronFHPAKey string) {
+	c.StopCronFHPAExecutor(cronFHPAKey)
+
+	c.scaleTargetLock.Lock()
+	defer c.scaleTargetLock.Unlock()
+	delete(c.cronFHPAScaleTargetMap, cronFHPAKey)
+}
+
 // CreateCronJobForExecutor creates the executor for a rule of CronFederatedHPA
 func (c *CronHandler) CreateCronJobForExecutor(cronFHPA *autoscalingv1alpha1.CronFederatedHPA,
 	rule autoscalingv1alpha1.CronFederatedHPARule) error {
