@@ -461,6 +461,11 @@ var _ = framework.SerialDescribe("[EstimatorAssumption] NodeResource plugin assu
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 			err = unstructured.SetNestedField(flinkObj.Object, componentCPU, "spec", "taskManager", "resource", "cpu")
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			// Keep memory negligible so CPU, not RAM, determines the exhaustion boundary.
+			for _, component := range []string{"jobManager", "taskManager"} {
+				err = unstructured.SetNestedField(flinkObj.Object, "1b", "spec", component, "resource", "memory")
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			}
 			err = unstructured.SetNestedStringMap(flinkObj.Object, targetNodeSelector, "spec", "podTemplate", "spec", "nodeSelector")
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 			_, err = dynamicClient.Resource(flinkDeploymentGVR).Namespace(testNamespace).

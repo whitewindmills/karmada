@@ -75,7 +75,7 @@ spec:
           return false
         end
     componentResource:
-      luaScript: |
+      luaScript: &flinkResources |
         local kube = require("kube")
 
         local function isempty(s)
@@ -104,6 +104,36 @@ spec:
             return n
           end
           return default
+        end
+
+        -- Flink prefers integer binary units; its operator falls back to Kubernetes quantities.
+        local function memory_quantity(value)
+          local units = {
+            [""] = "", b = "", bytes = "",
+            k = "Ki", kb = "Ki", kibibytes = "Ki",
+            m = "Mi", mb = "Mi", mebibytes = "Mi",
+            g = "Gi", gb = "Gi", gibibytes = "Gi",
+            t = "Ti", tb = "Ti", tebibytes = "Ti",
+          }
+          local amount, unit = string.match(value, "^%s*(%d+)%s*(%a*)%s*$")
+          if amount ~= nil then
+            local suffix = units[string.lower(unit)]
+            if suffix ~= nil then
+              return amount .. suffix
+            end
+          end
+          local parts = {}
+          for part in string.gmatch(value, "%S+") do
+            table.insert(parts, part)
+          end
+          local quantity = string.upper(table.concat(parts))
+          if string.sub(quantity, -1) == "B" then
+            quantity = string.sub(quantity, 1, -2)
+          end
+          if string.sub(quantity, -1) == "I" then
+            quantity = string.sub(quantity, 1, -2) .. "i"
+          end
+          return quantity
         end
 
         -- JSON-safe deep clone: strings/numbers/booleans/tables. Needed to prevent shared table references.
@@ -169,7 +199,7 @@ spec:
             jm_requires.resourceRequest.cpu = jm_cpu
           end
           if jm_memory ~= nil then
-            jm_requires.resourceRequest.memory = kube.getResourceQuantity(jm_memory)
+            jm_requires.resourceRequest.memory = memory_quantity(jm_memory)
           end
           apply_pod_template(pt_spec, jm_requires)
 
@@ -203,7 +233,7 @@ spec:
             tm_requires.resourceRequest.cpu = tm_cpu
           end
           if tm_memory ~= nil then
-            tm_requires.resourceRequest.memory = kube.getResourceQuantity(tm_memory)
+            tm_requires.resourceRequest.memory = memory_quantity(tm_memory)
           end
           apply_pod_template(pt_spec, tm_requires)
 
@@ -216,38 +246,6 @@ spec:
 
           return components
         end
-    replicaResource:
-      luaScript: |
-        local kube = require("kube")
-
-        local function isempty(s)
-          return s == nil or s == ''
-        end
-
-        -- Safe fetch of deeply nested table fields.
-        local function get(obj, path)
-          local cur = obj
-          for i = 1, #path do
-            if cur == nil then
-              return nil
-            end
-            cur = cur[path[i]]
-          end
-          return cur
-        end
-
-        -- Normalize possibly-string numbers with a default.
-        local function to_num(v, default)
-          if v == nil or v == '' then
-            return default
-          end
-          local n = tonumber(v)
-          if n ~= nil then
-            return n
-          end
-          return default
-        end
-
         function GetReplicas(observedObj)
           requires = {
             resourceRequest = {},
@@ -285,6 +283,12 @@ spec:
 
           local jm_memory = get(observedObj, {"spec","jobManager","resource","memory"})
           local tm_memory = get(observedObj, {"spec","taskManager","resource","memory"})
+          if jm_memory ~= nil then
+            jm_memory = memory_quantity(jm_memory)
+          end
+          if tm_memory ~= nil then
+            tm_memory = memory_quantity(tm_memory)
+          end
           if jm_memory ~= nil and tm_memory ~= nil then
             local jm_memory_value = kube.getResourceQuantity(jm_memory)
             local tm_memory_value = kube.getResourceQuantity(tm_memory)
@@ -318,6 +322,8 @@ spec:
 
           return replica, requires
         end
+    replicaResource:
+      luaScript: *flinkResources
     statusAggregation:
       luaScript: >
         function AggregateStatus(desiredObj, statusItems)

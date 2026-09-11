@@ -25,6 +25,21 @@ resourcecustomizations/
 │               ├── ...
 ```
 
+## Flink memory quantities
+
+FlinkDeployment memory follows Flink's binary unit syntax: `2048m` means `2Gi`,
+not Kubernetes milli-bytes. Both resource hooks share the same conversion and
+also accept Kubernetes-style quantities such as `2Gi`. Integer Flink units take
+precedence over the operator's Kubernetes-quantity fallback.
+
+This affects scheduling and FederatedResourceQuota accounting, not the propagated
+FlinkDeployment specification. When upgrading from an interpreter that treated
+`m` as milli-bytes, review memory quotas and capacity: recorded requirements now
+reflect the actual Flink memory allocation.
+
+See [Flink MemorySize](https://github.com/apache/flink/blob/release-1.20/flink-core-api/src/main/java/org/apache/flink/configuration/MemorySize.java)
+and the operator's [resource memory conversion](https://github.com/apache/flink-kubernetes-operator/blob/38a9f197465082a5f5987653b9497d7e5aef384a/flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/utils/ResourceConfigUtils.java).
+
 ## How to test
 
 ### Running Tests
