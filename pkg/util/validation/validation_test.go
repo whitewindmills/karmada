@@ -923,6 +923,23 @@ func TestValidateApplicationFailover(t *testing.T) {
 			expectedErr:                 "",
 		},
 		{
+			name:                        "omitted tolerationSeconds accepts the API default",
+			applicationFailoverBehavior: &policyv1alpha1.ApplicationFailoverBehavior{},
+		},
+		{
+			name: "zero tolerationSeconds allows immediate failover",
+			applicationFailoverBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
+				DecisionConditions: policyv1alpha1.DecisionConditions{TolerationSeconds: new(int32(0))},
+			},
+		},
+		{
+			name: "omitted tolerationSeconds does not skip other validation",
+			applicationFailoverBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
+				PurgeMode: policyv1alpha1.PurgeModeGracefully,
+			},
+			expectedErr: "spec.failover.application.gracePeriodSeconds: Invalid value: null: should not be empty when purgeMode is gracefully",
+		},
+		{
 			name: "the tolerationSeconds is less than zero",
 			applicationFailoverBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
 				DecisionConditions: policyv1alpha1.DecisionConditions{
