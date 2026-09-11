@@ -20,6 +20,8 @@ set -o pipefail
 
 SCRIPT_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
 
+bash "${SCRIPT_ROOT}/hack/verify-crdgen-tool-errors.sh"
+
 DIFFROOT="${SCRIPT_ROOT}/charts/karmada/_crds/bases"
 TMP_DIFFROOT="${SCRIPT_ROOT}/_tmp/charts/karmada/_crds/bases"
 DIFFEXAMPLES="${SCRIPT_ROOT}/examples/customresourceinterpreter/apis"
@@ -82,4 +84,3 @@ else
   echo "${DIFFOPERATOR} is out of date. Please run hack/update-crdgen.sh"
   exit 1
 fi
-

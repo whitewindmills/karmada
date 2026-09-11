@@ -26,8 +26,8 @@ YQ_VER="v4.44.6"
 source hack/util.sh
 
 echo "Generating with controller-gen"
-util::install_tools ${CONTROLLER_GEN_PKG} ${CONTROLLER_GEN_VER} >/dev/null 2>&1
-util::install_tools ${YQ_PKG} ${YQ_VER} >/dev/null 2>&1
+util::install_tools ${CONTROLLER_GEN_PKG} ${CONTROLLER_GEN_VER} >/dev/null
+util::install_tools ${YQ_PKG} ${YQ_VER} >/dev/null
 
 # Unify the crds used by helm chart and the installation scripts
 controller-gen crd paths=./pkg/apis/autoscaling/... output:crd:dir=./charts/karmada/_crds/bases/autoscaling
