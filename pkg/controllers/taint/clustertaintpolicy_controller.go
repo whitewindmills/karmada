@@ -77,6 +77,9 @@ func (c *ClusterTaintPolicyController) Reconcile(ctx context.Context, req contro
 	// This prevents repeated taint addition/removal cycles when conflicting policies exist.
 	policies := clusterTaintPolicyList.Items
 	sort.Slice(policies, func(i, j int) bool {
+		if policies[i].CreationTimestamp.Equal(&policies[j].CreationTimestamp) {
+			return policies[i].Name < policies[j].Name
+		}
 		return policies[i].CreationTimestamp.Before(&policies[j].CreationTimestamp)
 	})
 

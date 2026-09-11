@@ -20,6 +20,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +35,71 @@ import (
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	"github.com/karmada-io/karmada/pkg/util/gclient"
 )
+
+func TestReconcilePolicyOrderIsDeterministic(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		addPolicyNewer bool
+		wantTaint      bool
+	}{
+		{name: "equal timestamps are ordered by name"},
+		{name: "creation time remains primary", addPolicyNewer: true, wantTaint: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			now := metav1.NewTime(time.Unix(1000, 0))
+			condition := []policyv1alpha1.MatchCondition{{
+				ConditionType: "Ready", Operator: policyv1alpha1.MatchConditionOpIn,
+				StatusValues: []metav1.ConditionStatus{metav1.ConditionTrue},
+			}}
+			addPolicy := policyv1alpha1.ClusterTaintPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "a-add", CreationTimestamp: now},
+				Spec: policyv1alpha1.ClusterTaintPolicySpec{
+					Taints:          []policyv1alpha1.Taint{{Key: "testing/ordered", Effect: corev1.TaintEffectNoSchedule}},
+					AddOnConditions: condition,
+				},
+			}
+			removePolicy := *addPolicy.DeepCopy()
+			removePolicy.Name = "z-remove"
+			removePolicy.Spec.AddOnConditions = nil
+			removePolicy.Spec.RemoveOnConditions = condition
+			if tt.addPolicyNewer {
+				addPolicy.CreationTimestamp = metav1.NewTime(now.Add(time.Second))
+			}
+			cluster := &clusterv1alpha1.Cluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "member"},
+				Status: clusterv1alpha1.ClusterStatus{
+					Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
+				},
+			}
+			reversed := false
+			fakeClient := fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithObjects(cluster).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(_ context.Context, _ client.WithWatch, list client.ObjectList, _ ...client.ListOption) error {
+						policies := list.(*policyv1alpha1.ClusterTaintPolicyList)
+						policies.Items = []policyv1alpha1.ClusterTaintPolicy{addPolicy, removePolicy}
+						if reversed {
+							policies.Items[0], policies.Items[1] = policies.Items[1], policies.Items[0]
+						}
+						return nil
+					},
+				}).Build()
+			controller := &ClusterTaintPolicyController{Client: fakeClient, EventRecorder: record.NewFakeRecorder(10)}
+			for _, order := range []bool{false, true, false} {
+				reversed = order
+				if _, err := controller.Reconcile(t.Context(), controllerruntime.Request{NamespacedName: client.ObjectKey{Name: cluster.Name}}); err != nil {
+					t.Fatal(err)
+				}
+				got := &clusterv1alpha1.Cluster{}
+				if err := fakeClient.Get(t.Context(), client.ObjectKey{Name: cluster.Name}, got); err != nil {
+					t.Fatal(err)
+				}
+				if (len(got.Spec.Taints) > 0) != tt.wantTaint {
+					t.Errorf("reversed=%v: taints = %v, want taint present %v", order, got.Spec.Taints, tt.wantTaint)
+				}
+			}
+		})
+	}
+}
 
 // TestReconcilePatchRejectsStaleData verifies that ClusterTaintPolicyController's
 // Patch uses optimistic locking so that a concurrent taint modification (e.g. by
