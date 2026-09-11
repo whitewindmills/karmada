@@ -102,8 +102,12 @@ func (ctrl *Controller) Reconcile(ctx context.Context, req controllerruntime.Req
 	}
 
 	// Simulate a validation webhook by validating the resource.
-	if err := ctrl.validateKarmada(ctx, karmada); err != nil {
-		klog.ErrorS(err, "Validation failed for karmada", "name", karmada.Name)
+	valid, err := ctrl.validateKarmada(ctx, karmada)
+	if err != nil {
+		klog.ErrorS(err, "Failed to persist Karmada validation status", "name", karmada.Name)
+		return controllerruntime.Result{}, err
+	}
+	if !valid {
 		return controllerruntime.Result{}, nil
 	}
 

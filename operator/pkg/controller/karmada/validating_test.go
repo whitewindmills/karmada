@@ -18,16 +18,20 @@ package karmada
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
+	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	operatorv1alpha1 "github.com/karmada-io/karmada/operator/pkg/apis/operator/v1alpha1"
 	"github.com/karmada-io/karmada/operator/pkg/util"
@@ -299,9 +303,9 @@ func TestController_validateKarmada(t *testing.T) {
 	recorder := record.NewFakeRecorder(10)
 	ctrl := &Controller{Client: cl, EventRecorder: recorder}
 
-	err = ctrl.validateKarmada(context.Background(), karmada)
-	if err == nil {
-		t.Fatal("expected validation error, got nil")
+	valid, err := ctrl.validateKarmada(context.Background(), karmada)
+	if err != nil || valid {
+		t.Fatalf("expected invalid input with a persisted condition, got valid=%v, err=%v", valid, err)
 	}
 
 	updated := &operatorv1alpha1.Karmada{}
@@ -346,13 +350,56 @@ func TestController_validateKarmada_StatusUpdateError(t *testing.T) {
 	recorder := record.NewFakeRecorder(10)
 	ctrl := &Controller{Client: cl, EventRecorder: recorder}
 
-	err = ctrl.validateKarmada(context.Background(), karmada)
+	valid, err := ctrl.validateKarmada(context.Background(), karmada)
+	if valid {
+		t.Fatal("invalid input must not be accepted when its condition cannot be persisted")
+	}
 	if err == nil {
 		t.Fatal("expected status update error, got nil")
 	}
 	if !strings.Contains(err.Error(), "failed to update validate condition") {
 		t.Fatalf("expected wrapped update error, got %v", err)
 	}
+}
+
+func TestReconcileRetriesValidationStatusFailures(t *testing.T) {
+	karmada := &operatorv1alpha1.Karmada{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: operatorv1alpha1.KarmadaSpec{
+			CRDTarball: &operatorv1alpha1.CRDTarball{
+				HTTPSource: &operatorv1alpha1.HTTPSource{URL: "bad-url"},
+			},
+		},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, operatorv1alpha1.AddToScheme(scheme))
+	statusError := errors.New("validation status update failed")
+	statusWrites := 0
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(karmada).WithStatusSubresource(karmada).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				statusWrites++
+				if statusWrites == 1 {
+					return statusError
+				}
+				return c.SubResource(subresource).Update(ctx, obj, opts...)
+			},
+		}).Build()
+	controller := &Controller{Client: c, EventRecorder: record.NewFakeRecorder(10)}
+	request := controllerruntime.Request{NamespacedName: client.ObjectKeyFromObject(karmada)}
+	_, err := controller.Reconcile(t.Context(), request)
+	require.NoError(t, err)
+	require.Zero(t, statusWrites, "the first reconcile only applies defaults")
+
+	_, err = controller.Reconcile(t.Context(), request)
+	require.ErrorIs(t, err, statusError, "a failed validation status write must request a retry")
+	_, err = controller.Reconcile(t.Context(), request)
+	require.NoError(t, err, "persisted invalid input should not retry indefinitely")
+	require.Equal(t, 2, statusWrites)
+	require.NoError(t, c.Get(t.Context(), request.NamespacedName, karmada))
+	require.Len(t, karmada.Status.Conditions, 1)
+	require.Equal(t, ValidationErrorReason, karmada.Status.Conditions[0].Reason)
+	require.Equal(t, metav1.ConditionFalse, karmada.Status.Conditions[0].Status)
 }
 
 func buildValidationFakeClient(karmada *operatorv1alpha1.Karmada, withStatusSubresource bool) (client.Client, error) {

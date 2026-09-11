@@ -118,7 +118,7 @@ func validate(karmada *operatorv1alpha1.Karmada) error {
 	return nil
 }
 
-func (ctrl *Controller) validateKarmada(ctx context.Context, karmada *operatorv1alpha1.Karmada) error {
+func (ctrl *Controller) validateKarmada(ctx context.Context, karmada *operatorv1alpha1.Karmada) (bool, error) {
 	if err := validate(karmada); err != nil {
 		ctrl.EventRecorder.Event(karmada, corev1.EventTypeWarning, ValidationErrorReason, err.Error())
 
@@ -131,9 +131,10 @@ func (ctrl *Controller) validateKarmada(ctx context.Context, karmada *operatorv1
 		}
 		meta.SetStatusCondition(&karmada.Status.Conditions, newCondition)
 		if updateErr := ctrl.Status().Update(ctx, karmada); updateErr != nil {
-			return fmt.Errorf("failed to update validate condition, validate error: %+v, update err: %+v", err, updateErr)
+			return false, fmt.Errorf("failed to update validate condition, validate error: %v, update err: %w", err, updateErr)
 		}
-		return err
+		klog.ErrorS(err, "Validation failed for karmada", "name", karmada.Name)
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
