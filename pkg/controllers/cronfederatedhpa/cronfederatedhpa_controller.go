@@ -146,6 +146,8 @@ func (c *CronFHPAController) processCronRule(ctx context.Context, cronFHPA *auto
 	}
 
 	if err := c.updateRuleHistory(ctx, cronFHPA, rule); err != nil {
+		// An executor without persisted history cannot be tracked reliably on retries or rule removal.
+		c.CronHandler.StopRuleExecutor(cronFHPAKey, rule.Name)
 		c.EventRecorder.Event(cronFHPA, corev1.EventTypeWarning, "UpdateCronFederatedHPAFailed", err.Error())
 		return err
 	}
