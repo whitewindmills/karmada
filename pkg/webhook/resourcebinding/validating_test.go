@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"reflect"
 	"strings"
@@ -330,6 +331,11 @@ func TestValidatingAdmission_Handle(t *testing.T) {
 		WithOverallLimits(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("150m")}),
 		WithOverallUsed(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0m")}),
 	)
+	rbLargeReplicas := makeTestRB("quota-ns", "rb-large-replicas",
+		WithClusters([]workv1alpha2.TargetCluster{{Name: "m1", Replicas: math.MaxInt32}, {Name: "m2", Replicas: math.MaxInt32}}),
+		WithReplicaRequirements(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1m")}),
+	)
+	rbLargeReplicas.Spec.Replicas = math.MaxInt32
 
 	// For: "update passes quota (allowed response, non-dryrun)"
 	frqForUpdatePassNonDryRun := makeTestFRQ("quota-ns", "frq-update-pass-nondryrun",
@@ -539,6 +545,16 @@ func TestValidatingAdmission_Handle(t *testing.T) {
 			clientObjects: []client.Object{frqForCreateExceeds},
 			enableFederatedQuotaEnforcementFeatureGate: true,
 			wantResponse: quotaExceededResponse("FederatedResourceQuota(quota-ns/frq-create-exceeds) exceeded for resource cpu: requested sum 200m, limit 150m."),
+		},
+		{
+			name: "large duplicated replica total must exceed quota",
+			req: newAdmissionRequestBuilder(t, admissionv1.Create, rbLargeReplicas.Namespace, rbLargeReplicas.Name, "large-replicas").
+				WithObject(rbLargeReplicas).
+				Build(),
+			decoder:       &fakeDecoder{decodeObj: rbLargeReplicas},
+			clientObjects: []client.Object{frqForCreateExceeds},
+			enableFederatedQuotaEnforcementFeatureGate: true,
+			wantResponse: quotaExceededResponse("FederatedResourceQuota(quota-ns/frq-create-exceeds) exceeded for resource cpu: requested sum 4294967294m, limit 150m."),
 		},
 		{
 			name: "update passes quota (allowed response, non-dryrun)",

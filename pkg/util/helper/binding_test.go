@@ -18,6 +18,7 @@ package helper
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -1684,6 +1685,41 @@ func TestCalculateResourceUsage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := CalculateResourceUsage(tt.rb)
 			compareResourceLists(t, tt.expected, result)
+		})
+	}
+}
+
+func TestCalculateResourceUsageWithLargeReplicaTotals(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		replicas []int32
+		total    int64
+	}{
+		{name: "cross signed range", replicas: []int32{math.MaxInt32, 1}, total: 2147483648},
+		{name: "duplicated maximum", replicas: []int32{math.MaxInt32, math.MaxInt32}, total: 4294967294},
+		{name: "wrap to zero", replicas: []int32{1 << 30, 1 << 30, 1 << 30, 1 << 30}, total: 4294967296},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			binding := &workv1alpha2.ResourceBinding{Spec: workv1alpha2.ResourceBindingSpec{
+				ReplicaRequirements: &workv1alpha2.ReplicaRequirements{ResourceRequest: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1m"),
+					corev1.ResourceMemory: resource.MustParse("2Mi"),
+					"example.com/device":  resource.MustParse("1"),
+				}},
+			}}
+			for i, replicas := range tt.replicas {
+				binding.Spec.Clusters = append(binding.Spec.Clusters, workv1alpha2.TargetCluster{
+					Name: fmt.Sprintf("member%d", i), Replicas: replicas,
+				})
+			}
+			original := binding.DeepCopy()
+			usage := CalculateResourceUsage(binding)
+			compareResourceLists(t, corev1.ResourceList{
+				corev1.ResourceCPU:    *resource.NewMilliQuantity(tt.total, resource.DecimalSI),
+				corev1.ResourceMemory: *resource.NewQuantity(tt.total*2*1024*1024, resource.BinarySI),
+				"example.com/device":  *resource.NewQuantity(tt.total, resource.DecimalSI),
+			}, usage)
+			assert.Equal(t, original, binding, "resource accounting must not mutate replica requests")
 		})
 	}
 }

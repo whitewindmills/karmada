@@ -563,22 +563,20 @@ func CalculateResourceUsage(rb *workv1alpha2.ResourceBinding) corev1.ResourceLis
 
 	// if Components is not set, calculate the resource usage based on ReplicaRequirements.
 	if rb.Spec.ReplicaRequirements != nil && len(rb.Spec.ReplicaRequirements.ResourceRequest) > 0 {
-		totalReplicas := int32(0)
+		totalReplicas := int64(0)
 		for _, cluster := range rb.Spec.Clusters {
-			totalReplicas += cluster.Replicas
+			totalReplicas += int64(cluster.Replicas)
 		}
 		if totalReplicas == 0 {
 			return corev1.ResourceList{}
 		}
-		replicaCount := int64(totalReplicas)
-
 		for resourceName, quantityPerReplica := range rb.Spec.ReplicaRequirements.ResourceRequest {
 			if quantityPerReplica.IsZero() {
 				continue
 			}
 
 			totalQuantity := quantityPerReplica.DeepCopy()
-			totalQuantity.Mul(replicaCount)
+			totalQuantity.Mul(totalReplicas)
 
 			usage[resourceName] = totalQuantity
 		}
