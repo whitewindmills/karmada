@@ -250,6 +250,9 @@ func (o *objectWatcherImpl) Delete(ctx context.Context, clusterName string, desi
 	deleteBackground := metav1.DeletePropagationBackground
 	deleteOption := metav1.DeleteOptions{
 		PropagationPolicy: &deleteBackground,
+		Preconditions: &metav1.Preconditions{
+			UID: new(clusterObj.GetUID()),
+		},
 	}
 
 	err = dynamicClusterClient.DynamicClientSet.Resource(gvr).Namespace(desireObj.GetNamespace()).Delete(ctx, desireObj.GetName(), deleteOption)
