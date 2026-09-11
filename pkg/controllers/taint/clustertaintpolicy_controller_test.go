@@ -23,10 +23,46 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 )
+
+func TestClusterPredicateTargetChanges(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*clusterv1alpha1.Cluster)
+		want   bool
+	}{
+		{name: "labels", mutate: func(c *clusterv1alpha1.Cluster) { c.Labels = map[string]string{"target": "yes"} }, want: true},
+		{name: "provider", mutate: func(c *clusterv1alpha1.Cluster) { c.Spec.Provider = "new-provider" }, want: true},
+		{name: "region", mutate: func(c *clusterv1alpha1.Cluster) { c.Spec.Region = "new-region" }, want: true},
+		{name: "zones", mutate: func(c *clusterv1alpha1.Cluster) { c.Spec.Zones = []string{"new-zone"} }, want: true},
+		{name: "conditions", mutate: func(c *clusterv1alpha1.Cluster) { c.Status.Conditions[0].Status = metav1.ConditionFalse }, want: true},
+		{name: "resource version only", mutate: func(c *clusterv1alpha1.Cluster) { c.ResourceVersion = "2" }},
+		{name: "annotations only", mutate: func(c *clusterv1alpha1.Cluster) { c.Annotations = map[string]string{"note": "changed"} }},
+		{name: "controller taint update", mutate: func(c *clusterv1alpha1.Cluster) {
+			c.Spec.Taints = []corev1.Taint{{Key: "example.com/taint", Effect: corev1.TaintEffectNoSchedule}}
+		}},
+		{name: "unchanged", mutate: func(*clusterv1alpha1.Cluster) {}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			oldCluster := &clusterv1alpha1.Cluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "member", ResourceVersion: "1"},
+				Status: clusterv1alpha1.ClusterStatus{
+					Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
+				},
+			}
+			newCluster := oldCluster.DeepCopy()
+			tt.mutate(newCluster)
+			got := newClusterPredicate().Update(event.UpdateEvent{ObjectOld: oldCluster, ObjectNew: newCluster})
+			if got != tt.want {
+				t.Errorf("Update() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestConditionMatches(t *testing.T) {
 	tests := []struct {

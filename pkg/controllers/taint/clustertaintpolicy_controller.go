@@ -200,9 +200,8 @@ func removeTaintsFromCluster(cluster *clusterv1alpha1.Cluster, taints []policyv1
 	return clusterTaints
 }
 
-// SetupWithManager creates a controller and register to controller manager.
-func (c *ClusterTaintPolicyController) SetupWithManager(mgr controllerruntime.Manager) error {
-	clusterStatusConditionPredicateFn := predicate.Funcs{
+func newClusterPredicate() predicate.Funcs {
+	return predicate.Funcs{
 		CreateFunc: func(_ event.CreateEvent) bool {
 			// After controller reboot, it will reconcile all clusters.
 			return true
@@ -210,11 +209,18 @@ func (c *ClusterTaintPolicyController) SetupWithManager(mgr controllerruntime.Ma
 		UpdateFunc: func(event event.UpdateEvent) bool {
 			oldCluster := event.ObjectOld.(*clusterv1alpha1.Cluster)
 			newCluster := event.ObjectNew.(*clusterv1alpha1.Cluster)
-			return !reflect.DeepEqual(oldCluster.Status.Conditions, newCluster.Status.Conditions)
+			return !reflect.DeepEqual(oldCluster.Status.Conditions, newCluster.Status.Conditions) ||
+				!reflect.DeepEqual(oldCluster.Labels, newCluster.Labels) ||
+				oldCluster.Spec.Provider != newCluster.Spec.Provider ||
+				oldCluster.Spec.Region != newCluster.Spec.Region ||
+				!slices.Equal(oldCluster.Spec.Zones, newCluster.Spec.Zones)
 		},
 		DeleteFunc: func(_ event.DeleteEvent) bool { return false },
 	}
+}
 
+// SetupWithManager creates a controller and register to controller manager.
+func (c *ClusterTaintPolicyController) SetupWithManager(mgr controllerruntime.Manager) error {
 	clusterTaintPolicyPredicateFn := predicate.Funcs{
 		CreateFunc: func(_ event.CreateEvent) bool { return true },
 		UpdateFunc: func(event event.UpdateEvent) bool {
@@ -247,7 +253,7 @@ func (c *ClusterTaintPolicyController) SetupWithManager(mgr controllerruntime.Ma
 
 	return controllerruntime.NewControllerManagedBy(mgr).
 		Named(ControllerName).
-		For(&clusterv1alpha1.Cluster{}, builder.WithPredicates(clusterStatusConditionPredicateFn)).
+		For(&clusterv1alpha1.Cluster{}, builder.WithPredicates(newClusterPredicate())).
 		Watches(&policyv1alpha1.ClusterTaintPolicy{}, handler.EnqueueRequestsFromMapFunc(clusterTaintPolicyMapFunc),
 			builder.WithPredicates(clusterTaintPolicyPredicateFn)).
 		WithOptions(controller.Options{RateLimiter: ratelimiterflag.DefaultControllerRateLimiter[controllerruntime.Request](c.RateLimiterOptions)}).
