@@ -24,6 +24,7 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -98,7 +99,17 @@ func (c *ClusterTaintPolicyController) Reconcile(ctx context.Context, req contro
 		}
 	}
 
-	if !reflect.DeepEqual(clusterObj.Spec.Taints, clusterCopyObj.Spec.Taints) {
+	// Intermediate remove/add decisions must not reset the lifetime of an unchanged final taint.
+	for i := range clusterCopyObj.Spec.Taints {
+		taint := &clusterCopyObj.Spec.Taints[i]
+		for _, previous := range clusterObj.Spec.Taints {
+			if taint.MatchTaint(&previous) && taint.Value == previous.Value {
+				taint.TimeAdded = previous.TimeAdded
+				break
+			}
+		}
+	}
+	if !equality.Semantic.DeepEqual(clusterObj.Spec.Taints, clusterCopyObj.Spec.Taints) {
 		objPatch := client.MergeFromWithOptions(clusterObj, client.MergeFromWithOptimisticLock{})
 		err := c.Client.Patch(ctx, clusterCopyObj, objPatch)
 		if err != nil {

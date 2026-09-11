@@ -36,6 +36,88 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/gclient"
 )
 
+func TestReconcilePreservesUnchangedTaints(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		initialTaint bool
+		removeLast   bool
+		changedValue bool
+		wantPatches  int
+	}{
+		{name: "retain an existing taint lifetime", initialTaint: true},
+		{name: "empty final taints are unchanged", removeLast: true},
+		{name: "a new taint value gets a new lifetime", initialTaint: true, changedValue: true, wantPatches: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			oldTime := metav1.NewTime(time.Unix(1000, 0))
+			cluster := &clusterv1alpha1.Cluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "member"},
+				Status: clusterv1alpha1.ClusterStatus{
+					Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
+				},
+			}
+			if tt.initialTaint {
+				cluster.Spec.Taints = []corev1.Taint{{Key: "testing/stable", Value: "same", Effect: corev1.TaintEffectNoExecute, TimeAdded: &oldTime}}
+			}
+			condition := []policyv1alpha1.MatchCondition{{
+				ConditionType: "Ready", Operator: policyv1alpha1.MatchConditionOpIn,
+				StatusValues: []metav1.ConditionStatus{metav1.ConditionTrue},
+			}}
+			addPolicy := &policyv1alpha1.ClusterTaintPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "z-add", CreationTimestamp: oldTime},
+				Spec: policyv1alpha1.ClusterTaintPolicySpec{
+					Taints:          []policyv1alpha1.Taint{{Key: "testing/stable", Value: "same", Effect: corev1.TaintEffectNoExecute}},
+					AddOnConditions: condition,
+				},
+			}
+			removePolicy := addPolicy.DeepCopy()
+			removePolicy.Name = "a-remove"
+			removePolicy.Spec.AddOnConditions = nil
+			removePolicy.Spec.RemoveOnConditions = condition
+			if tt.removeLast {
+				addPolicy.Name, removePolicy.Name = "a-add", "z-remove"
+			}
+			if tt.changedValue {
+				addPolicy.Spec.Taints[0].Value = "changed"
+			}
+			patches := 0
+			fakeClient := fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithObjects(cluster, addPolicy, removePolicy).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						patches++
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+			controller := &ClusterTaintPolicyController{Client: fakeClient, EventRecorder: record.NewFakeRecorder(10)}
+			for range 2 {
+				if _, err := controller.Reconcile(t.Context(), controllerruntime.Request{NamespacedName: client.ObjectKey{Name: cluster.Name}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if patches != tt.wantPatches {
+				t.Errorf("patch requests = %d, want %d", patches, tt.wantPatches)
+			}
+			got := &clusterv1alpha1.Cluster{}
+			if err := fakeClient.Get(t.Context(), client.ObjectKey{Name: cluster.Name}, got); err != nil {
+				t.Fatal(err)
+			}
+			if tt.removeLast {
+				if len(got.Spec.Taints) != 0 {
+					t.Errorf("unexpected final taints: %v", got.Spec.Taints)
+				}
+				return
+			}
+			if len(got.Spec.Taints) != 1 {
+				t.Fatalf("expected one final taint, got %v", got.Spec.Taints)
+			}
+			preserved := got.Spec.Taints[0].TimeAdded.Equal(&oldTime)
+			if preserved == tt.changedValue {
+				t.Errorf("old taint lifetime preserved = %v, changed value = %v", preserved, tt.changedValue)
+			}
+		})
+	}
+}
+
 func TestReconcilePolicyOrderIsDeterministic(t *testing.T) {
 	for _, tt := range []struct {
 		name           string
