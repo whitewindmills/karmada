@@ -578,6 +578,82 @@ func TestGetDependencies(t *testing.T) {
 	}
 }
 
+func TestGetDependenciesIngressTLS(t *testing.T) {
+	dependencies := []configv1alpha1.DependentObjectReference{
+		{APIVersion: "v1", Kind: "Secret", Namespace: namespace, Name: "first-secret"},
+		{APIVersion: "v1", Kind: "Secret", Namespace: namespace, Name: "second-secret"},
+	}
+	tests := []struct {
+		name string
+		tls  []any
+		want []configv1alpha1.DependentObjectReference
+	}{
+		{
+			name: "no TLS",
+		},
+		{
+			name: "TLS without secretName",
+			tls: []any{
+				map[string]any{"hosts": []any{"example.com"}},
+			},
+		},
+		{
+			name: "TLS with empty secretName",
+			tls: []any{
+				map[string]any{"hosts": []any{"example.com"}, "secretName": ""},
+			},
+		},
+		{
+			name: "TLS with named secrets",
+			tls: []any{
+				map[string]any{"secretName": "first-secret"},
+				map[string]any{"secretName": "second-secret"},
+			},
+			want: dependencies,
+		},
+		{
+			name: "mixed TLS entries",
+			tls: []any{
+				map[string]any{"hosts": []any{"default.example.com"}},
+				map[string]any{"secretName": "first-secret"},
+				map[string]any{"hosts": []any{"empty.example.com"}, "secretName": ""},
+				map[string]any{"secretName": "second-secret"},
+				map[string]any{"hosts": []any{"sni.example.com"}},
+			},
+			want: dependencies,
+		},
+	}
+	interpreter := NewDefaultInterpreter()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := map[string]any{
+				"defaultBackend": map[string]any{
+					"service": map[string]any{
+						"name": "backend",
+						"port": map[string]any{"number": int64(80)},
+					},
+				},
+			}
+			if tt.tls != nil {
+				spec["tls"] = tt.tls
+			}
+			object := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "networking.k8s.io/v1",
+				"kind":       "Ingress",
+				"metadata": map[string]any{
+					"name":      "test-ingress",
+					"namespace": namespace,
+				},
+				"spec": spec,
+			}}
+
+			got, err := interpreter.GetDependencies(object)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestReflectStatus(t *testing.T) {
 	currStatus := policyv1.PodDisruptionBudgetStatus{
 		CurrentHealthy:     1,

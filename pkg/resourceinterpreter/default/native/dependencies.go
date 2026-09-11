@@ -188,6 +188,10 @@ func getIngressDependencies(object *unstructured.Unstructured) ([]configv1alpha1
 	}
 	var dependentObjectRefs []configv1alpha1.DependentObjectReference
 	for _, tls := range ingressObj.Spec.TLS {
+		// secretName is optional when TLS routing is based on SNI alone.
+		if tls.SecretName == "" {
+			continue
+		}
 		dependentObjectRefs = append(dependentObjectRefs, configv1alpha1.DependentObjectReference{
 			APIVersion: "v1",
 			Kind:       "Secret",
