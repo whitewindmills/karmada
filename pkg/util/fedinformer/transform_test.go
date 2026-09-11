@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 
 	workv1alpha1 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha1"
 )
@@ -173,6 +174,44 @@ func TestNodeTransformFunc(t *testing.T) {
 			got, _ := NodeTransformFunc(tt.obj)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("NodeTransformFunc: got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPodTransformFuncPreservesPodResources(t *testing.T) {
+	resources := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1500m"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("1Gi"),
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test"},
+		Spec:       corev1.PodSpec{Resources: resources},
+	}
+	for _, tt := range []struct {
+		name string
+		obj  any
+	}{
+		{name: "pod", obj: pod},
+		{name: "tombstone", obj: cache.DeletedFinalStateUnknown{Key: "default/test", Obj: pod}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			obj, err := PodTransformFunc(tt.obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transformed, ok := obj.(*corev1.Pod)
+			if !ok {
+				t.Fatalf("expected a Pod, got %T", obj)
+			}
+			if !reflect.DeepEqual(transformed.Spec.Resources, resources) {
+				t.Errorf("pod-level resources = %v, want %v", transformed.Spec.Resources, resources)
 			}
 		})
 	}

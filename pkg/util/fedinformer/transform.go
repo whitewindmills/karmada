@@ -109,6 +109,7 @@ func PodTransformFunc(obj any) (any, error) {
 			InitContainers: pod.Spec.InitContainers,
 			Containers:     pod.Spec.Containers,
 			Overhead:       pod.Spec.Overhead,
+			Resources:      pod.Spec.Resources,
 		},
 		Status: corev1.PodStatus{
 			Phase:      pod.Status.Phase,
