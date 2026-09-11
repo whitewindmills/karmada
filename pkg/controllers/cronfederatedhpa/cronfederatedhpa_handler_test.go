@@ -94,6 +94,13 @@ func TestCronFHPAScaleTargetRefUpdates(t *testing.T) {
 
 			updated := handler.CronFHPAScaleTargetRefUpdates(tt.cronFHPAKey, tt.updatedTarget)
 			assert.Equal(t, tt.expectedUpdate, updated, "Unexpected result for %s", tt.name)
+			assert.False(t, handler.CronFHPAScaleTargetRefUpdates(tt.cronFHPAKey, tt.updatedTarget),
+				"Repeated observations of the new target must not report another change")
+			if tt.expectedUpdate {
+				assert.True(t, handler.CronFHPAScaleTargetRefUpdates(tt.cronFHPAKey, tt.initialTarget),
+					"Returning to the original target must report a change")
+				assert.False(t, handler.CronFHPAScaleTargetRefUpdates(tt.cronFHPAKey, tt.initialTarget))
+			}
 		})
 	}
 }

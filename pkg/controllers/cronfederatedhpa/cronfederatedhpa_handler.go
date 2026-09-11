@@ -63,18 +63,14 @@ func NewCronHandler(client client.Client, eventRecorder record.EventRecorder) *C
 	}
 }
 
-// CronFHPAScaleTargetRefUpdates checks if the scale target changed
+// CronFHPAScaleTargetRefUpdates records the scale target and reports changes from the previous observation.
 func (c *CronHandler) CronFHPAScaleTargetRefUpdates(cronFHPAKey string, scaleTarget autoscalingv2.CrossVersionObjectReference) bool {
 	c.scaleTargetLock.Lock()
 	defer c.scaleTargetLock.Unlock()
 
 	origTarget, ok := c.cronFHPAScaleTargetMap[cronFHPAKey]
-	if !ok {
-		c.cronFHPAScaleTargetMap[cronFHPAKey] = scaleTarget
-		return false
-	}
-
-	return !equality.Semantic.DeepEqual(origTarget, scaleTarget)
+	c.cronFHPAScaleTargetMap[cronFHPAKey] = scaleTarget
+	return ok && !equality.Semantic.DeepEqual(origTarget, scaleTarget)
 }
 
 // AddCronExecutorIfNotExist creates the executor for CronFederatedHPA if not exist
