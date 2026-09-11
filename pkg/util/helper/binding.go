@@ -19,6 +19,7 @@ package helper
 import (
 	"context"
 	"hash/fnv"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -95,8 +96,7 @@ func (a *Dispenser) AllocateByWeight(w ClusterWeightInfoList) {
 	if a.Done() {
 		return
 	}
-	sum := w.GetWeightSum()
-	if sum == 0 {
+	if !slices.ContainsFunc(w, func(cluster ClusterWeightInfo) bool { return cluster.Weight > 0 }) {
 		return
 	}
 

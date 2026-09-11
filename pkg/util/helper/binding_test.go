@@ -18,6 +18,7 @@ package helper
 
 import (
 	"context"
+	"math"
 	"reflect"
 	"testing"
 
@@ -67,6 +68,20 @@ func Test_dispenser_AllocateByWeight(t *testing.T) {
 		desired           []workv1alpha2.TargetCluster
 		uuid              types.UID
 	}{
+		{
+			name:        "positive weights with overflowing sum",
+			newReplicas: 12,
+			weightList: ClusterWeightInfoList{
+				{ClusterName: "A", Weight: math.MaxInt64},
+				{ClusterName: "B", Weight: math.MaxInt64},
+				{ClusterName: "C", Weight: 2},
+			},
+			desired: []workv1alpha2.TargetCluster{
+				{Name: "A", Replicas: 6},
+				{Name: "B", Replicas: 6},
+				{Name: "C", Replicas: 0},
+			},
+		},
 		{
 			name:        "Scale up 6 replicas",
 			newReplicas: 6,
@@ -239,6 +254,25 @@ func Test_dispenser_AllocateByWeight(t *testing.T) {
 			}
 			if !testhelper.IsScheduleResultEqual(a.Result, tt.desired) {
 				t.Errorf("expected result after AllocateByWeight: %v, but got: %v", tt.desired, a.Result)
+			}
+		})
+	}
+}
+
+func TestDispenserZeroWeights(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		weights ClusterWeightInfoList
+	}{
+		{name: "empty weights"},
+		{name: "all zero weights", weights: ClusterWeightInfoList{{ClusterName: "A"}, {ClusterName: "B"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			initial := []workv1alpha2.TargetCluster{{Name: "A", Replicas: 1}}
+			dispenser := NewDispenser(2, initial, "")
+			dispenser.AllocateByWeight(tt.weights)
+			if dispenser.NumReplicas != 2 || !reflect.DeepEqual(dispenser.Result, initial) {
+				t.Errorf("zero-weight allocation changed state: %+v", dispenser)
 			}
 		})
 	}

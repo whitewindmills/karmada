@@ -61,7 +61,7 @@ func getStaticWeightInfoList(clusters []spreadconstraint.ClusterDetailInfo, weig
 			})
 		}
 	}
-	if list.GetWeightSum() == 0 {
+	if len(list) == 0 {
 		for _, cluster := range clusters {
 			list = append(list, helper.ClusterWeightInfo{
 				ClusterName: cluster.Name,

@@ -103,6 +103,27 @@ func Test_assignByStaticWeightStrategy(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "positive static weights with overflowing sum",
+			clusters: []spreadconstraint.ClusterDetailInfo{
+				{Name: ClusterMember1, Cluster: helper.NewCluster(ClusterMember1)},
+				{Name: ClusterMember2, Cluster: helper.NewCluster(ClusterMember2)},
+				{Name: ClusterMember3, Cluster: helper.NewCluster(ClusterMember3)},
+			},
+			weightPreference: &policyv1alpha1.ClusterPreferences{
+				StaticWeightList: []policyv1alpha1.StaticClusterWeight{
+					{TargetCluster: policyv1alpha1.ClusterAffinity{ClusterNames: []string{ClusterMember1}}, Weight: math.MaxInt64},
+					{TargetCluster: policyv1alpha1.ClusterAffinity{ClusterNames: []string{ClusterMember2}}, Weight: math.MaxInt64},
+					{TargetCluster: policyv1alpha1.ClusterAffinity{ClusterNames: []string{ClusterMember3}}, Weight: 2},
+				},
+			},
+			replicas: 12,
+			want: []workv1alpha2.TargetCluster{
+				{Name: ClusterMember1, Replicas: 6},
+				{Name: ClusterMember2, Replicas: 6},
+				{Name: ClusterMember3, Replicas: 0},
+			},
+		},
+		{
 			name: "replica 12, default weight",
 			clusters: []spreadconstraint.ClusterDetailInfo{
 				{Name: ClusterMember1, Cluster: helper.NewCluster(ClusterMember1)},
