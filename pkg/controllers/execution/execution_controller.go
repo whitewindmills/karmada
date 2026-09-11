@@ -242,6 +242,9 @@ func (c *Controller) cleanupPolicyClaimMetadata(ctx context.Context, work *workv
 
 		clusterObj, err := helper.GetObjectFromCache(c.RESTMapper, c.InformerManager, fedKey)
 		if err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
 			klog.ErrorS(err, "Failed to get the resource from member cluster cache", "kind", workload.GetKind(), "namespace", workload.GetNamespace(), "name", workload.GetName(), "cluster", cluster.Name)
 			return err
 		}
@@ -257,6 +260,9 @@ func (c *Controller) cleanupPolicyClaimMetadata(ctx context.Context, work *workv
 		operationResult, err := c.ObjectWatcher.Update(ctx, cluster.Name, workload, clusterObj)
 		metrics.CountUpdateResourceToCluster(err, workload.GetAPIVersion(), workload.GetKind(), cluster.Name, string(operationResult))
 		if err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
 			klog.ErrorS(err, "Failed to update metadata in the given member cluster", "cluster", cluster.Name)
 			return err
 		}

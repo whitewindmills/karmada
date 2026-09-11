@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -43,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
@@ -54,6 +56,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/fedinformer"
 	"github.com/karmada-io/karmada/pkg/util/fedinformer/genericmanager"
+	genericmanagerfake "github.com/karmada-io/karmada/pkg/util/fedinformer/genericmanager/testing"
 	"github.com/karmada-io/karmada/pkg/util/gclient"
 	"github.com/karmada-io/karmada/pkg/util/objectwatcher"
 	testhelper "github.com/karmada-io/karmada/test/helper"
@@ -288,6 +291,107 @@ func TestExecutionController_Reconcile(t *testing.T) {
 				} else {
 					assert.True(t, apierrors.IsNotFound(err), "pod (%s/%s) was not deleted", podNamespace, podName)
 				}
+			}
+		})
+	}
+}
+
+func TestPreservationCleanupSkipsMissingResources(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		missing       bool
+		updateMissing bool
+		updateDenied  bool
+		lookupError   bool
+	}{
+		{name: "missing from synchronized cache", missing: true},
+		{name: "deleted before metadata update", updateMissing: true},
+		{name: "update authorization failure", updateDenied: true},
+		{name: "uninitialized cache is not absence", lookupError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			first := newManagedUnstructuredPod("1", map[string]any{
+				"containers": []any{map[string]any{"name": "test", "image": "image"}},
+			}, nil)
+			first.SetName("first")
+			util.RecordManagedLabels(first)
+			util.RecordManagedAnnotations(first)
+			second := first.DeepCopy()
+			second.SetName("second")
+			firstJSON, err := first.MarshalJSON()
+			require.NoError(t, err)
+			secondJSON, err := second.MarshalJSON()
+			require.NoError(t, err)
+			work := testhelper.NewWork(testWorkName, testWorkNS, string(uuid.NewUUID()), firstJSON)
+			work.Spec.Workload.Manifests = append(work.Spec.Workload.Manifests,
+				workv1alpha1.Manifest{RawExtension: runtime.RawExtension{Raw: secondJSON}})
+			work.SetDeletionTimestamp(new(metav1.Now()))
+			work.SetFinalizers([]string{util.ExecutionControllerFinalizer, "example.com/observe-cleanup"})
+			work.Spec.PreserveResourcesOnDeletion = new(true)
+			cluster := newCluster(clusterName, clusterv1alpha1.ClusterConditionReady, metav1.ConditionTrue)
+			controlClient := fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithObjects(cluster, work).Build()
+			indexer := toolscache.NewIndexer(toolscache.MetaNamespaceKeyFunc, toolscache.Indexers{})
+			require.NoError(t, indexer.Add(second))
+			objects := []runtime.Object{second}
+			if !tt.missing {
+				require.NoError(t, indexer.Add(first))
+				objects = append(objects, first)
+			}
+			memberClient := dynamicfake.NewSimpleDynamicClient(scheme.Scheme, objects...)
+			gvr := corev1.SchemeGroupVersion.WithResource("pods")
+			denied := apierrors.NewForbidden(gvr.GroupResource(), first.GetName(), fmt.Errorf("access denied"))
+			memberClient.PrependReactor("update", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				obj := action.(clienttesting.UpdateAction).GetObject().(*unstructured.Unstructured)
+				if obj.GetName() != first.GetName() {
+					return false, nil, nil
+				}
+				if tt.updateMissing {
+					require.NoError(t, memberClient.Tracker().Delete(gvr, first.GetNamespace(), first.GetName()))
+					return true, nil, apierrors.NewNotFound(gvr.GroupResource(), first.GetName())
+				}
+				if tt.updateDenied {
+					return true, nil, denied
+				}
+				return false, nil, nil
+			})
+			managers := map[string]genericmanager.SingleClusterInformerManager{}
+			if !tt.lookupError {
+				managers[clusterName] = genericmanagerfake.NewFakeSingleClusterManager(true, true,
+					func(resource schema.GroupVersionResource) toolscache.GenericLister {
+						return toolscache.NewGenericLister(indexer, resource.GroupResource())
+					})
+			}
+			manager := genericmanagerfake.NewFakeMultiClusterInformerManager(managers)
+			mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+			mapper.Add(corev1.SchemeGroupVersion.WithKind("Pod"), meta.RESTScopeNamespace)
+			clusterClient := func(string, client.Client, *util.ClientOption) (*util.DynamicClusterClient, error) {
+				return &util.DynamicClusterClient{ClusterName: clusterName, DynamicClientSet: memberClient}, nil
+			}
+			controller := &Controller{
+				Client: controlClient, RESTMapper: mapper, InformerManager: manager,
+				ObjectWatcher: objectwatcher.NewObjectWatcher(controlClient, mapper, clusterClient, nil,
+					FakeResourceInterpreter{DefaultInterpreter: native.NewDefaultInterpreter()}, manager),
+			}
+			request := controllerruntime.Request{NamespacedName: client.ObjectKeyFromObject(work)}
+			_, err = controller.Reconcile(t.Context(), request)
+			wantErr := tt.lookupError || tt.updateDenied
+			if wantErr {
+				require.Error(t, err)
+				if tt.updateDenied {
+					assert.ErrorIs(t, err, denied)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, controlClient.Get(t.Context(), request.NamespacedName, work))
+			assert.Equal(t, wantErr, controllerutil.ContainsFinalizer(work, util.ExecutionControllerFinalizer))
+			remaining, err := memberClient.Resource(gvr).Namespace(second.GetNamespace()).Get(t.Context(), second.GetName(), metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, wantErr, remaining.GetLabels()[util.ManagedByKarmadaLabel] == util.ManagedByKarmadaLabelValue,
+				"a missing earlier manifest must not skip cleanup of surviving resources")
+			for _, action := range memberClient.Actions() {
+				assert.NotContains(t, []string{"create", "delete"}, action.GetVerb(),
+					"preservation cleanup must neither recreate nor delete member resources")
 			}
 		})
 	}
