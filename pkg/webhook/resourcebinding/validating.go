@@ -28,6 +28,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -156,9 +158,11 @@ func (v *ValidatingAdmission) validateFederatedResourceQuota(ctx context.Context
 
 func (v *ValidatingAdmission) processFRQsWithRetries(ctx context.Context, rb *workv1alpha2.ResourceBinding, totalRbDelta corev1.ResourceList, isDryRun bool) frqProcessOutcome {
 	var overallOutcome frqProcessOutcome
+	// A conflict on a later quota must not replay deltas already committed to earlier quotas.
+	updatedQuotas := sets.New[types.UID]()
 
 	retrySystemError := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		attemptResult := v.executeFRQProcessingAttempt(ctx, rb, totalRbDelta, isDryRun)
+		attemptResult := v.executeFRQProcessingAttempt(ctx, rb, totalRbDelta, isDryRun, updatedQuotas)
 
 		if attemptResult.ProcessError == nil {
 			overallOutcome = attemptResult
@@ -170,8 +174,9 @@ func (v *ValidatingAdmission) processFRQsWithRetries(ctx context.Context, rb *wo
 	return overallOutcome
 }
 
-func (v *ValidatingAdmission) executeFRQProcessingAttempt(ctx context.Context, rb *workv1alpha2.ResourceBinding, totalRbDelta corev1.ResourceList, isDryRun bool) frqProcessOutcome {
+func (v *ValidatingAdmission) executeFRQProcessingAttempt(ctx context.Context, rb *workv1alpha2.ResourceBinding, totalRbDelta corev1.ResourceList, isDryRun bool, updatedQuotas sets.Set[types.UID]) frqProcessOutcome {
 	outcome := frqProcessOutcome{}
+	alreadyUpdated := len(updatedQuotas)
 	var currentFrqsToUpdateStatus []*policyv1alpha1.FederatedResourceQuota
 	var currentValidationMessages []string
 
@@ -188,6 +193,9 @@ func (v *ValidatingAdmission) executeFRQProcessingAttempt(ctx context.Context, r
 	}
 
 	for _, frqItem := range frqList.Items {
+		if updatedQuotas.Has(frqItem.UID) {
+			continue
+		}
 		newStatus, msg, denialError := v.processSingleFRQ(&frqItem, rb.Namespace, rb.Name, totalRbDelta)
 		if denialError != nil {
 			outcome.earlyExitError = denialError
@@ -203,7 +211,7 @@ func (v *ValidatingAdmission) executeFRQProcessingAttempt(ctx context.Context, r
 		}
 	}
 
-	updateErr := v.updateFRQStatusesWithRetrySignal(ctx, currentFrqsToUpdateStatus, isDryRun, rb.Namespace, rb.Name)
+	updateErr := v.updateFRQStatusesWithRetrySignal(ctx, currentFrqsToUpdateStatus, isDryRun, rb.Namespace, rb.Name, updatedQuotas)
 	if updateErr != nil {
 		if apierrors.IsConflict(updateErr) {
 			klog.V(4).Infof("Conflict detected while updating FRQ status for RB %s/%s, will retry: %v", rb.Namespace, rb.Name, updateErr)
@@ -217,7 +225,7 @@ func (v *ValidatingAdmission) executeFRQProcessingAttempt(ctx context.Context, r
 	}
 
 	outcome.validationMessages = currentValidationMessages
-	outcome.updatedFRQCount = len(currentFrqsToUpdateStatus)
+	outcome.updatedFRQCount = alreadyUpdated + len(currentFrqsToUpdateStatus)
 	return outcome // attemptError is nil, successful attempt
 }
 
@@ -253,7 +261,7 @@ func (v *ValidatingAdmission) handleFRQOutcome(rb *workv1alpha2.ResourceBinding,
 // updateFRQStatusesWithRetrySignal attempts to update FRQ statuses.
 // It returns an error if any update fails. This error can be a conflict error (for retrying by RetryOnConflict)
 // or a different error (which will be treated as permanent by the caller within the retry func).
-func (v *ValidatingAdmission) updateFRQStatusesWithRetrySignal(ctx context.Context, frqsToUpdateStatus []*policyv1alpha1.FederatedResourceQuota, isDryRun bool, rbNamespace, rbName string) error {
+func (v *ValidatingAdmission) updateFRQStatusesWithRetrySignal(ctx context.Context, frqsToUpdateStatus []*policyv1alpha1.FederatedResourceQuota, isDryRun bool, rbNamespace, rbName string, updatedQuotas sets.Set[types.UID]) error {
 	if len(frqsToUpdateStatus) == 0 {
 		klog.V(4).Infof("No FederatedResourceQuotas required an update in this processing attempt for RB %s/%s.", rbNamespace, rbName)
 		return nil
@@ -273,6 +281,9 @@ func (v *ValidatingAdmission) updateFRQStatusesWithRetrySignal(ctx context.Conte
 			klog.Warningf("Failed to UPDATE status of FederatedResourceQuota %s/%s for RB %s/%s: %v. Returning error for retry evaluation.",
 				frqItem.Namespace, frqItem.Name, rbNamespace, rbName, errUpdate)
 			return errUpdate // Return the original error from Update (could be conflict)
+		}
+		if !isDryRun {
+			updatedQuotas.Insert(frqItem.UID)
 		}
 
 		logMsg := fmt.Sprintf("Successfully updated status of FRQ %s/%s for RB %s/%s.", frqItem.Namespace, frqItem.Name, rbNamespace, rbName)

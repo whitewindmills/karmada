@@ -18,6 +18,7 @@ package resourcebinding
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -25,7 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -74,6 +77,72 @@ func TestInvalidComponentsDoNotReserveQuota(t *testing.T) {
 			actual := &policyv1alpha1.FederatedResourceQuota{}
 			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(quota), actual))
 			assert.Equal(t, quota.Status, actual.Status)
+		})
+	}
+}
+
+func TestQuotaConflictRetryDoesNotReapplyCommittedDeltas(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		initial    string
+		delta      string
+		expected   string
+		limit      string
+		dryRun     bool
+		recreate   bool
+		firstCalls int
+	}{
+		{name: "reserve once", initial: "100m", delta: "100m", expected: "200m", limit: "200m", firstCalls: 1},
+		{name: "release once", initial: "300m", delta: "-100m", expected: "200m", limit: "1", firstCalls: 1},
+		{name: "dry run persists nothing", initial: "100m", delta: "100m", expected: "100m", limit: "200m", dryRun: true, firstCalls: 2},
+		{name: "recreated quota requires its own reservation", initial: "100m", delta: "100m", expected: "200m", limit: "200m", recreate: true, firstCalls: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			first := makeTestFRQ("default", "first",
+				WithOverallLimits(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(tt.limit)}),
+				WithOverallUsed(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(tt.initial)}))
+			second := first.DeepCopy()
+			second.Name, second.UID = "second", "second"
+			calls := map[string]int{}
+			firstUpdated := ""
+			injectedConflict := false
+			c := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(first, second).WithStatusSubresource(first).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+						name := obj.GetName()
+						calls[name]++
+						if firstUpdated == "" {
+							firstUpdated = name
+						}
+						if name != firstUpdated && !injectedConflict {
+							injectedConflict = true
+							if tt.recreate {
+								replacement := &policyv1alpha1.FederatedResourceQuota{}
+								require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "default", Name: firstUpdated}, replacement))
+								require.NoError(t, c.Delete(ctx, replacement))
+								replacement.ResourceVersion, replacement.UID = "", "replacement"
+								replacement.Status.OverallUsed = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(tt.initial)}
+								require.NoError(t, c.Create(ctx, replacement))
+							}
+							return apierrors.NewConflict(schema.GroupResource{Group: policyv1alpha1.GroupVersion.Group, Resource: "federatedresourcequotas"},
+								name, errors.New("concurrent quota update"))
+						}
+						return c.SubResource(subresource).Update(ctx, obj, opts...)
+					},
+				}).Build()
+			validator := &ValidatingAdmission{Client: c}
+			binding := makeTestRB("default", "binding")
+			outcome := validator.processFRQsWithRetries(t.Context(), binding,
+				corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(tt.delta)}, tt.dryRun)
+			assert.NoError(t, validator.handleFRQOutcome(binding, outcome))
+			assert.True(t, injectedConflict)
+			assert.Equal(t, tt.firstCalls, calls[firstUpdated], "a committed quota delta must not be replayed")
+			for _, original := range []*policyv1alpha1.FederatedResourceQuota{first, second} {
+				current := &policyv1alpha1.FederatedResourceQuota{}
+				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(original), current))
+				assert.True(t, current.Status.OverallUsed.Cpu().Equal(resource.MustParse(tt.expected)),
+					"quota %s usage = %s, want %s", current.Name, current.Status.OverallUsed.Cpu().String(), tt.expected)
+			}
 		})
 	}
 }
