@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	fakedynamic "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -493,6 +495,97 @@ func TestUpdateResourceRegistryEventHandler(t *testing.T) {
 
 			if err := test.verify(test.client, controller); err != nil {
 				t.Errorf("failed to verify controller, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestReconcileClusterWithRegistriesSelectorRemoval(t *testing.T) {
+	pods := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	deployments := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	tests := []struct {
+		name             string
+		podRegistries    registrySet
+		resourcesChanged bool
+	}{
+		{
+			name:          "unchanged selectors",
+			podRegistries: registrySet{"first": {}, "second": {}},
+		},
+		{
+			name:          "first registry removes pods",
+			podRegistries: registrySet{"second": {}},
+		},
+		{
+			name:          "second registry removes pods",
+			podRegistries: registrySet{"first": {}},
+		},
+		{
+			name:             "all registries remove pods",
+			resourcesChanged: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cluster := &clusterv1alpha1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "member1"}}
+			factory := informerfactory.NewSharedInformerFactory(fakekarmadaclient.NewClientset(), 0)
+			controller := &Controller{
+				informerFactory: factory,
+				restMapper:      restmapper.NewDiscoveryRESTMapper(apiGroupResources),
+			}
+			controller.clusterRegistry.Store(cluster.Name, clusterRegistry{
+				registries: registrySet{"first": {}, "second": {}},
+				resources: map[schema.GroupVersionResource]registrySet{
+					pods:        {"first": {}, "second": {}},
+					deployments: {"first": {}, "second": {}},
+				},
+			})
+			for _, name := range []string{"first", "second"} {
+				selectors := []searchv1alpha1.ResourceSelector{{APIVersion: "apps/v1", Kind: "Deployment"}}
+				if _, exists := tt.podRegistries[name]; exists {
+					selectors = append(selectors, searchv1alpha1.ResourceSelector{APIVersion: "v1", Kind: "Pod"})
+				}
+				registry := &searchv1alpha1.ResourceRegistry{
+					ObjectMeta: metav1.ObjectMeta{Name: name},
+					Spec: searchv1alpha1.ResourceRegistrySpec{
+						TargetCluster:     policyv1alpha1.ClusterAffinity{ClusterNames: []string{cluster.Name}},
+						ResourceSelectors: selectors,
+					},
+				}
+				if err := factory.Search().V1alpha1().ResourceRegistries().Informer().GetIndexer().Add(registry); err != nil {
+					t.Fatalf("failed to add registry: %v", err)
+				}
+			}
+			wantResources := map[schema.GroupVersionResource]registrySet{
+				deployments: {"first": {}, "second": {}},
+			}
+			if len(tt.podRegistries) > 0 {
+				wantResources[pods] = tt.podRegistries
+			}
+
+			_, current, resourcesChanged, newRegistry, err := controller.reconcileClusterWithRegistries(cluster)
+			if err != nil {
+				t.Fatalf("failed to reconcile registries: %v", err)
+			}
+			if newRegistry {
+				t.Error("existing cluster was treated as a new registry")
+			}
+			if resourcesChanged != tt.resourcesChanged {
+				t.Errorf("resourcesChanged = %v, want %v", resourcesChanged, tt.resourcesChanged)
+			}
+			if !reflect.DeepEqual(current.resources, wantResources) {
+				t.Errorf("resource references = %v, want %v", current.resources, wantResources)
+			}
+
+			_, current, resourcesChanged, _, err = controller.reconcileClusterWithRegistries(cluster)
+			if err != nil {
+				t.Fatalf("failed to reconcile unchanged registries: %v", err)
+			}
+			if resourcesChanged {
+				t.Error("unchanged registries triggered an informer rebuild")
+			}
+			if !reflect.DeepEqual(current.resources, wantResources) {
+				t.Errorf("retained resource references = %v, want %v", current.resources, wantResources)
 			}
 		})
 	}

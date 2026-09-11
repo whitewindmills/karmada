@@ -241,8 +241,18 @@ func (c *Controller) getClusterRegistriesModification(registries map[string]*sea
 		cr.registries[name] = struct{}{}
 		addedResources = c.getRegistryAddedResources(registries[name], cr, addedResources)
 	}
+	// Rebuild references before pruning resources to preserve watches shared by registries.
 	for _, registry := range matched {
+		for _, previousRegistries := range cr.resources {
+			delete(previousRegistries, registry.Name)
+		}
 		addedResources = c.getRegistryAddedResources(registry, cr, addedResources)
+	}
+	for resource, previousRegistries := range cr.resources {
+		if len(previousRegistries) == 0 {
+			removedResources = append(removedResources, resource)
+			delete(cr.resources, resource)
+		}
 	}
 	return
 }
