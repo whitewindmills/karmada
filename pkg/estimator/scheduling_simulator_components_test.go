@@ -218,6 +218,43 @@ func TestSchedulingSimulatorZeroReplicaInputs(t *testing.T) {
 	}
 }
 
+func TestSchedulingSimulatorRejectsNegativeReplicas(t *testing.T) {
+	requirements := (&pb.ComponentReplicaRequirements{}).MustSetResourceRequest(corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("1"),
+		corev1.ResourceMemory: resource.MustParse("1Gi"),
+	})
+	negative := &pb.Component{Name: "negative", Replicas: -1, ReplicaRequirements: requirements}
+	positive := &pb.Component{Name: "positive", Replicas: 1, ReplicaRequirements: requirements}
+	for _, tt := range []struct {
+		name       string
+		components []*pb.Component
+		upperBound int32
+		wantErr    bool
+	}{
+		{name: "negative first", components: []*pb.Component{negative}, upperBound: 1, wantErr: true},
+		{name: "negative after valid work", components: []*pb.Component{positive, negative}, upperBound: 1, wantErr: true},
+		{name: "minimum replicas", components: []*pb.Component{{Name: "minimum", Replicas: math.MinInt32, ReplicaRequirements: requirements}}, upperBound: 1, wantErr: true},
+		{name: "zero bound remains a no-op", components: []*pb.Component{negative}},
+		{name: "negative bound remains a no-op", components: []*pb.Component{negative}, upperBound: -1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			node := createNodeInfo("node", corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("4"),
+				corev1.ResourceMemory: resource.MustParse("8Gi"),
+				corev1.ResourcePods:   resource.MustParse("10"),
+			})
+			original := node.Allocatable.Clone()
+			got, err := NewSchedulingSimulator([]*schedulerframework.NodeInfo{node}).SimulateScheduling(tt.components, tt.upperBound)
+			if (err != nil) != tt.wantErr || got != 0 {
+				t.Errorf("SimulateScheduling() = (%d, %v), want (0, error=%v)", got, err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(node.Allocatable, original) {
+				t.Errorf("invalid replica count changed capacity: got %+v, want %+v", node.Allocatable, original)
+			}
+		})
+	}
+}
+
 func BenchmarkSimulateSchedulingZeroReplicas(b *testing.B) {
 	components := []*pb.Component{{
 		Name: "scaled-to-zero",

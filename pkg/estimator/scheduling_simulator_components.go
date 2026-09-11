@@ -17,7 +17,7 @@ limitations under the License.
 package estimator
 
 import (
-	"slices"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
@@ -46,14 +46,25 @@ func NewSchedulingSimulator(nodes []*schedulerframework.NodeInfo) *SchedulingSim
 
 // SimulateScheduling implements the First Fit(FF) algorithm to estimate
 // the maximum number of complete component sets that can be scheduled on the cluster.
+// Negative replica counts are rejected before any node resources are consumed.
 //
 // FF Algorithm Steps:
 // 1. For each complete set, try to schedule all components using first-fit strategy
 // 2. Continue until no more complete sets can be scheduled or upper limit is reached
 func (s *SchedulingSimulator) SimulateScheduling(components []*pb.Component, upperBound int32) (int32, error) {
-	hasReplicas := slices.ContainsFunc(components, func(component *pb.Component) bool {
-		return component != nil && component.Replicas != 0
-	})
+	if upperBound <= 0 {
+		return 0, nil
+	}
+	hasReplicas := false
+	for _, component := range components {
+		if component == nil {
+			continue
+		}
+		if component.Replicas < 0 {
+			return 0, fmt.Errorf("component %q has negative replicas: %d", component.Name, component.Replicas)
+		}
+		hasReplicas = hasReplicas || component.Replicas > 0
+	}
 	var completeSets int32
 	// Try to schedule complete component sets until we can no longer do so or reach the upper limit.
 	for completeSets < upperBound {
