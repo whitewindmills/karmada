@@ -687,6 +687,53 @@ func TestGetNodeAvailable(t *testing.T) {
 	}
 }
 
+func TestGetAllocatableModelingsSkipsSaturatedNodes(t *testing.T) {
+	cluster := &clusterv1alpha1.Cluster{Spec: clusterv1alpha1.ClusterSpec{
+		ResourceModels: []clusterv1alpha1.ResourceModel{{
+			Grade: 0,
+			Ranges: []clusterv1alpha1.ResourceModelRange{
+				{Name: corev1.ResourceCPU, Min: resource.MustParse("0"), Max: resource.MustParse("4")},
+				{Name: corev1.ResourceMemory, Min: resource.MustParse("0"), Max: resource.MustParse("8Gi")},
+			},
+		}},
+	}}
+	newNode := func(name string) *corev1.Node {
+		return &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
+				corev1.ResourcePods: resource.MustParse("1"),
+			}},
+		}
+	}
+	full, overfull := newNode("full"), newNode("overfull")
+	healthy1, healthy2 := newNode("healthy1"), newNode("healthy2")
+	var pods []*corev1.Pod
+	for _, nodeName := range []string{"full", "overfull", "overfull"} {
+		pods = append(pods, &corev1.Pod{
+			Spec: corev1.PodSpec{NodeName: nodeName}, Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		})
+	}
+	for _, tt := range []struct {
+		name  string
+		nodes []*corev1.Node
+		count int
+	}{
+		{name: "full first", nodes: []*corev1.Node{full, healthy1, healthy2}, count: 2},
+		{name: "full middle", nodes: []*corev1.Node{healthy1, full, healthy2}, count: 2},
+		{name: "full last", nodes: []*corev1.Node{healthy1, healthy2, full}, count: 2},
+		{name: "overfull first", nodes: []*corev1.Node{overfull, healthy1, healthy2}, count: 2},
+		{name: "consecutive saturated nodes", nodes: []*corev1.Node{full, overfull, healthy1, healthy2}, count: 2},
+		{name: "all saturated", nodes: []*corev1.Node{full, overfull}},
+		{name: "all healthy", nodes: []*corev1.Node{healthy1, healthy2}, count: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, []clusterv1alpha1.AllocatableModeling{{Grade: 0, Count: tt.count}},
+				getAllocatableModelings(cluster, tt.nodes, pods))
+		})
+	}
+}
+
 func TestGetAllocatableModelings(t *testing.T) {
 	tests := []struct {
 		name    string
