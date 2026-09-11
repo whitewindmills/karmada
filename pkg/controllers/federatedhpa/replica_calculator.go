@@ -255,6 +255,7 @@ func (c *ReplicaCalculator) GetObjectMetricReplicas(currentReplicas int32, targe
 
 // GetObjectPerPodMetricReplicas calculates the desired replica count based on a target metric usage (as a milli-value)
 // for the given object in the given namespace, and the current replica count.
+// The global replica count is calibrated to the resource template before rounding.
 func (c *ReplicaCalculator) GetObjectPerPodMetricReplicas(statusReplicas int32, targetAverageUsage int64, metricName string, namespace string, objectRef *autoscalingv2.CrossVersionObjectReference, metricSelector labels.Selector, calibration float64) (replicaCount int32, usage int64, timestamp time.Time, err error) {
 	// The usage here refers to the total value of all metrics from the pods.
 	usage, timestamp, err = c.metricsClient.GetObjectMetric(metricName, namespace, objectRef, metricSelector)
@@ -262,14 +263,14 @@ func (c *ReplicaCalculator) GetObjectPerPodMetricReplicas(statusReplicas int32, 
 		return 0, 0, time.Time{}, fmt.Errorf("unable to get metric %s: %v on %s %s/%s", metricName, objectRef.Kind, namespace, objectRef.Name, err)
 	}
 
-	replicaCount = statusReplicas
-	usageRatio := float64(usage) / (float64(targetAverageUsage) * float64(replicaCount))
+	desiredReplicas := float64(statusReplicas)
+	usageRatio := float64(usage) / (float64(targetAverageUsage) * desiredReplicas)
 	if math.Abs(1.0-usageRatio) > c.tolerance {
 		// update number of replicas if change is large enough
-		replicaCount = int32(math.Ceil(float64(usage) / float64(targetAverageUsage) / calibration))
+		desiredReplicas = float64(usage) / float64(targetAverageUsage)
 	}
 	usage = int64(math.Ceil(float64(usage) / float64(statusReplicas)))
-	return int32(math.Ceil(float64(replicaCount) / calibration)), usage, timestamp, nil
+	return int32(math.Ceil(desiredReplicas / calibration)), usage, timestamp, nil
 }
 
 // getUsageRatioReplicaCount calculates the desired replica count based on usageRatio and ready pods count.
