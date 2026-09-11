@@ -17,6 +17,8 @@ limitations under the License.
 package estimator
 
 import (
+	"slices"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 
@@ -49,6 +51,9 @@ func NewSchedulingSimulator(nodes []*schedulerframework.NodeInfo) *SchedulingSim
 // 1. For each complete set, try to schedule all components using first-fit strategy
 // 2. Continue until no more complete sets can be scheduled or upper limit is reached
 func (s *SchedulingSimulator) SimulateScheduling(components []*pb.Component, upperBound int32) (int32, error) {
+	hasReplicas := slices.ContainsFunc(components, func(component *pb.Component) bool {
+		return component != nil && component.Replicas != 0
+	})
 	var completeSets int32
 	// Try to schedule complete component sets until we can no longer do so or reach the upper limit.
 	for completeSets < upperBound {
@@ -58,6 +63,10 @@ func (s *SchedulingSimulator) SimulateScheduling(components []*pb.Component, upp
 		}
 		if !ok {
 			break
+		}
+		// Validate an empty set once, then avoid repeating work that consumes no resources.
+		if !hasReplicas {
+			return upperBound, nil
 		}
 		completeSets++
 	}

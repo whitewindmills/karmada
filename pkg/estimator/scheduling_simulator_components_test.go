@@ -18,6 +18,8 @@ package estimator
 
 import (
 	"fmt"
+	"math"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -143,6 +145,92 @@ func TestMatchNode(t *testing.T) {
 				t.Errorf("MatchNode() = %v, expected %v", result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestSchedulingSimulatorZeroReplicaAllocations(t *testing.T) {
+	components := []*pb.Component{{
+		Name: "scaled-to-zero",
+		ReplicaRequirements: (&pb.ComponentReplicaRequirements{}).MustSetResourceRequest(corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1"),
+			corev1.ResourceMemory: resource.MustParse("1Gi"),
+		}),
+	}}
+	node := createNodeInfo("node", corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("4"),
+		corev1.ResourceMemory: resource.MustParse("8Gi"),
+		corev1.ResourcePods:   resource.MustParse("10"),
+	})
+	original := node.Allocatable.Clone()
+	simulator := NewSchedulingSimulator([]*schedulerframework.NodeInfo{node})
+	allocations := func(upperBound int32) float64 {
+		t.Helper()
+		var count int32
+		var err error
+		allocs := testing.AllocsPerRun(5, func() {
+			count, err = simulator.SimulateScheduling(components, upperBound)
+		})
+		if err != nil || count != upperBound {
+			t.Fatalf("SimulateScheduling() = (%d, %v), want (%d, nil)", count, err, upperBound)
+		}
+		return allocs
+	}
+	small, large := allocations(1), allocations(1000)
+	if large > small+2 {
+		t.Fatalf("zero-replica work used %.0f allocations for 1000 sets versus %.0f for one set", large, small)
+	}
+	if count, err := simulator.SimulateScheduling(components, math.MaxInt32); err != nil || count != math.MaxInt32 {
+		t.Errorf("SimulateScheduling() = (%d, %v), want (%d, nil)", count, err, math.MaxInt32)
+	}
+	if !reflect.DeepEqual(node.Allocatable, original) {
+		t.Error("zero-replica work consumed node resources")
+	}
+}
+
+func TestSchedulingSimulatorZeroReplicaInputs(t *testing.T) {
+	invalid := &pb.Component{
+		Name: "invalid",
+		ReplicaRequirements: &pb.ComponentReplicaRequirements{
+			ResourceRequestBytes: map[string][]byte{"cpu": {0xff}},
+		},
+	}
+	for _, tt := range []struct {
+		name       string
+		components []*pb.Component
+		upperBound int32
+		want       int32
+		wantErr    bool
+	}{
+		{name: "no components", upperBound: 10, want: 10},
+		{name: "nil component", components: []*pb.Component{nil}, upperBound: 10, want: 10},
+		{name: "zero replicas", components: []*pb.Component{{Name: "zero"}}, upperBound: 10, want: 10},
+		{name: "zero bound", components: []*pb.Component{invalid}},
+		{name: "negative bound", upperBound: -1},
+		{name: "invalid zero-replica requirements still fail", components: []*pb.Component{invalid}, upperBound: 10, wantErr: true},
+		{name: "positive component still needs capacity", components: []*pb.Component{nil, {Name: "zero"}, {Name: "positive", Replicas: 1}}, upperBound: 10},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NewSchedulingSimulator(nil).SimulateScheduling(tt.components, tt.upperBound)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Errorf("SimulateScheduling() = (%d, %v), want count %d, error %v", got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
+func BenchmarkSimulateSchedulingZeroReplicas(b *testing.B) {
+	components := []*pb.Component{{
+		Name: "scaled-to-zero",
+		ReplicaRequirements: (&pb.ComponentReplicaRequirements{}).MustSetResourceRequest(corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("1"),
+		}),
+	}}
+	simulator := NewSchedulingSimulator(nil)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := simulator.SimulateScheduling(components, 1000); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
