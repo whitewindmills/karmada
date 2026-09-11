@@ -85,7 +85,7 @@ func (g *cachedRESTMapper) RESTMapping(gk schema.GroupKind, versions ...string) 
 
 	// consult underlying mapper and then update cache
 	restMapping, err := g.getMapper().RESTMapping(gk, versions...)
-	if meta.IsNoMatchError(err) {
+	if meta.IsNoMatchError(err) && g.discoveryClient != nil {
 		// hit here means a resource might be missing from the current rest mapper,
 		// probably because a new resource(CRD) has been added, we have to reload
 		// resource and rebuild the rest mapper.
@@ -127,6 +127,7 @@ func (g *cachedRESTMapper) getMapper() meta.RESTMapper {
 
 // NewCachedRESTMapper builds a cachedRESTMapper with a customized underlyingMapper.
 // If underlyingMapper is nil, defaults to DiscoveryRESTMapper.
+// A customized mapper handles its own discovery; its lookup errors are returned unchanged.
 func NewCachedRESTMapper(cfg *rest.Config, underlyingMapper meta.RESTMapper) (meta.RESTMapper, error) {
 	cachedMapper := cachedRESTMapper{}
 

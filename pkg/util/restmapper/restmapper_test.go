@@ -17,14 +17,45 @@ limitations under the License.
 package restmapper
 
 import (
+	"fmt"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	discoveryfake "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/restmapper"
 	coretesting "k8s.io/client-go/testing"
 )
+
+func TestCustomRESTMapperWithoutDiscovery(t *testing.T) {
+	gv := schema.GroupVersion{Version: "v1"}
+	underlying := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
+	underlying.Add(gv.WithKind("Pod"), meta.RESTScopeNamespace)
+	mapper, err := NewCachedRESTMapper(nil, underlying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, versions := range [][]string{nil, {"v1", "v2"}, {"v1"}} {
+		t.Run(fmt.Sprintf("missing/versions=%v", versions), func(t *testing.T) {
+			for range 2 {
+				mapping, err := mapper.RESTMapping(schema.GroupKind{Kind: "Missing"}, versions...)
+				if mapping != nil || !meta.IsNoMatchError(err) {
+					t.Errorf("RESTMapping() = (%v, %v), want a NoMatch error", mapping, err)
+				}
+			}
+		})
+	}
+	for range 2 {
+		mapping, err := mapper.RESTMapping(schema.GroupKind{Kind: "Pod"}, "v1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mapping.Resource != gv.WithResource("pods") {
+			t.Errorf("RESTMapping() = %v, want %v", mapping.Resource, gv.WithResource("pods"))
+		}
+	}
+}
 
 var fakeResources = []*metav1.APIResourceList{
 	{
