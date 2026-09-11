@@ -26,6 +26,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -63,6 +64,54 @@ func Test_initializeDirectory(t *testing.T) {
 			}
 			if err := os.RemoveAll("tmp"); err != nil {
 				t.Errorf("clean up test directory failed after ut case:%s, %v", tt.name, err)
+			}
+		})
+	}
+}
+
+func TestCommandInitOption_ValidateEtcdPVCSize(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		size    string
+		servers string
+		wantErr string
+	}{
+		{name: "malformed", mode: etcdStorageModePVC, size: "abc", wantErr: `invalid etcd-pvc-size "abc"`},
+		{name: "empty", mode: etcdStorageModePVC, wantErr: `invalid etcd-pvc-size ""`},
+		{name: "negative", mode: etcdStorageModePVC, size: "-1Gi", wantErr: "etcd-pvc-size must be greater than 0"},
+		{name: "zero", mode: etcdStorageModePVC, size: "0", wantErr: "etcd-pvc-size must be greater than 0"},
+		{name: "zero with units", mode: etcdStorageModePVC, size: "0Gi", wantErr: "etcd-pvc-size must be greater than 0"},
+		{name: "binary units", mode: etcdStorageModePVC, size: "5Gi"},
+		{name: "decimal units", mode: etcdStorageModePVC, size: "5G"},
+		{name: "fractional units", mode: etcdStorageModePVC, size: "1.5Gi"},
+		{name: "plain bytes", mode: etcdStorageModePVC, size: "1024"},
+		{name: "emptyDir ignores unused size", mode: etcdStorageModeEmptyDir, size: "abc"},
+		{name: "hostPath ignores unused size", mode: etcdStorageModeHostPath, size: "abc"},
+		{name: "external etcd ignores local size", mode: etcdStorageModePVC, size: "abc", servers: "https://etcd.example:2379"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opt := CommandInitOption{
+				EtcdStorageMode:          tt.mode,
+				EtcdPersistentVolumeSize: tt.size,
+				StorageClassesName:       "standard",
+				EtcdHostDataPath:         "/data",
+				EtcdReplicas:             1,
+				ExternalEtcdServers:      tt.servers,
+				ImagePullPolicy:          string(corev1.PullIfNotPresent),
+			}
+			err := opt.Validate("karmadactl")
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			if !assert.NoError(t, err) {
+				return
+			}
+			if tt.mode == etcdStorageModePVC && tt.servers == "" {
+				_, pvc := opt.etcdVolume()
+				assert.True(t, pvc.Spec.Resources.Requests.Storage().Equal(resource.MustParse(tt.size)))
 			}
 		})
 	}

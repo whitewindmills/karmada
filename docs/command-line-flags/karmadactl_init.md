@@ -109,7 +109,7 @@ karmadactl init
       --etcd-image string                                       etcd image
       --etcd-node-selector-labels string                        the labels used for etcd pod to select nodes, valid in hostPath mode, and with each label separated by a comma. ( e.g. --etcd-node-selector-labels karmada.io/etcd=true,kubernetes.io/os=linux)
       --etcd-priority-class string                              The priority class name for the component etcd. (default "system-node-critical")
-      --etcd-pvc-size string                                    etcd data path,valid in pvc mode. (default "5Gi")
+      --etcd-pvc-size string                                    etcd storage capacity as a positive Kubernetes quantity (e.g. 5Gi), valid in PVC mode. (default "5Gi")
       --etcd-replicas int32                                     etcd replica set, cluster 3,5...singular (default 1)
       --etcd-storage-mode string                                etcd data storage mode(emptyDir,hostPath,PVC). value is PVC, specify --storage-classes-name (default "hostPath")
       --external-etcd-ca-cert-path string                       The path of CA certificate of the external etcd cluster in pem format.

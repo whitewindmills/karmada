@@ -29,6 +29,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -239,6 +240,16 @@ func (i *CommandInitOption) validateLocalEtcd(parentCommand string) error {
 
 	if i.EtcdStorageMode == etcdStorageModePVC && i.StorageClassesName == "" {
 		return fmt.Errorf("when etcd storage mode is PVC, storageClassesName is not empty. See '%s init --help'", parentCommand)
+	}
+
+	if i.EtcdStorageMode == etcdStorageModePVC {
+		size, err := resource.ParseQuantity(i.EtcdPersistentVolumeSize)
+		if err != nil {
+			return fmt.Errorf("invalid etcd-pvc-size %q: %w", i.EtcdPersistentVolumeSize, err)
+		}
+		if size.Sign() <= 0 {
+			return fmt.Errorf("etcd-pvc-size must be greater than 0")
+		}
 	}
 
 	if i.WaitComponentReadyTimeout < 0 {
