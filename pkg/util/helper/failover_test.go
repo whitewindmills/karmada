@@ -93,6 +93,27 @@ func Test_BuildPreservedLabelState(t *testing.T) {
 			wantErr: assert.Error,
 			want:    nil,
 		},
+		{
+			name: "empty rules do not require status decoding",
+			args: args{
+				statePreservation: &policyv1alpha1.StatePreservation{},
+				rawStatus:         []byte(`invalid JSON`),
+			},
+			wantErr: assert.NoError,
+			want:    map[string]string{},
+		},
+		{
+			name: "invalid status is rejected",
+			args: args{
+				statePreservation: &policyv1alpha1.StatePreservation{
+					Rules: []policyv1alpha1.StatePreservationRule{
+						{AliasLabelName: "checkpoint", JSONPath: "{ .checkpoint }"},
+					},
+				},
+				rawStatus: []byte(`invalid JSON`),
+			},
+			wantErr: assert.Error,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -105,7 +126,7 @@ func Test_BuildPreservedLabelState(t *testing.T) {
 	}
 }
 
-func Test_parseJSONValue(t *testing.T) {
+func TestBuildPreservedLabelStateJSONPath(t *testing.T) {
 	// This json value describes a DeploymentList object, it contains two deployment elements.
 	var deploymentListStrBytes = []byte(`{"apiVersion":"v1","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"creationTimestamp":"2024-11-27T07:59:13Z","generation":2,"labels":{"app":"nginx","propagationpolicy.karmada.io/permanent-id":"89a95e21-57ec-4f5d-b8c6-15bc196c1449"},"name":"nginx-01","namespace":"default","resourceVersion":"1148","uid":"12cf1e9f-61fd-4e47-a14e-e844165c7f93"},"spec":{"progressDeadlineSeconds":600,"replicas":2,"revisionHistoryLimit":10,"selector":{"matchLabels":{"app":"nginx"}},"strategy":{"rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"},"type":"RollingUpdate"},"template":{"metadata":{"creationTimestamp":null,"labels":{"app":"nginx"}},"spec":{"containers":[{"image":"nginx","imagePullPolicy":"Always","name":"nginx","resources":{},"terminationMessagePath":"/dev/termination-log","terminationMessagePolicy":"File"}],"dnsPolicy":"ClusterFirst","restartPolicy":"Always","schedulerName":"default-scheduler","securityContext":{},"terminationGracePeriodSeconds":30}}},"status":{"availableReplicas":2,"observedGeneration":2,"readyReplicas":2,"replicas":2,"updatedReplicas":2}},{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"creationTimestamp":"2024-11-27T07:59:13Z","generation":2,"labels":{"app":"nginx","propagationpolicy.karmada.io/permanent-id":"89a95e21-57ec-4f5d-b8c6-15bc196c1449"},"name":"nginx-02","namespace":"default","resourceVersion":"1149","uid":"12cf1e9f-61fd-4e47-a14e-e844165c7f93"},"spec":{"progressDeadlineSeconds":600,"replicas":2,"revisionHistoryLimit":10,"selector":{"matchLabels":{"app":"nginx"}},"strategy":{"rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"},"type":"RollingUpdate"},"template":{"metadata":{"creationTimestamp":null,"labels":{"app":"nginx"}},"spec":{"containers":[{"image":"nginx","imagePullPolicy":"Always","name":"nginx","resources":{},"terminationMessagePath":"/dev/termination-log","terminationMessagePolicy":"File"}],"dnsPolicy":"ClusterFirst","restartPolicy":"Always","schedulerName":"default-scheduler","securityContext":{},"terminationGracePeriodSeconds":30}}},"status":{"availableReplicas":2,"observedGeneration":2,"readyReplicas":2,"replicas":2,"updatedReplicas":2}}],"kind":"List","metadata":{"resourceVersion":""}}`)
 	type args struct {
@@ -248,12 +269,63 @@ func Test_parseJSONValue(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseJSONValue(tt.args.rawStatus, tt.args.jsonPath)
-			if !tt.wantErr(t, err, fmt.Sprintf("parseJSONValue(%s, %v)", tt.args.rawStatus, tt.args.jsonPath)) {
+			state, err := BuildPreservedLabelState(&policyv1alpha1.StatePreservation{
+				Rules: []policyv1alpha1.StatePreservationRule{
+					{AliasLabelName: "value", JSONPath: tt.args.jsonPath},
+				},
+			}, tt.args.rawStatus)
+			if !tt.wantErr(t, err, fmt.Sprintf("BuildPreservedLabelState(%s, %v)", tt.args.rawStatus, tt.args.jsonPath)) {
 				return
 			}
-			got = strings.Trim(got, " ")
-			assert.Equalf(t, tt.want, got, "parseJSONValue(%s, %v)", tt.args.rawStatus, tt.args.jsonPath)
+			got := strings.Trim(state["value"], " ")
+			assert.Equalf(t, tt.want, got, "BuildPreservedLabelState(%s, %v)", tt.args.rawStatus, tt.args.jsonPath)
 		})
 	}
+}
+
+func TestBuildPreservedLabelStateDecodeAllocations(t *testing.T) {
+	allocations := func(ruleCount int) float64 {
+		t.Helper()
+		rules, status := preservedStateTestInputs(ruleCount)
+		var err error
+		count := testing.AllocsPerRun(5, func() {
+			_, err = BuildPreservedLabelState(rules, status)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	singleRule := allocations(1)
+	multipleRules := allocations(10)
+	if multipleRules > 2*singleRule {
+		t.Errorf("10 rules used %.0f allocations versus %.0f for one rule; status must not be decoded per rule", multipleRules, singleRule)
+	}
+}
+
+func BenchmarkBuildPreservedLabelState(b *testing.B) {
+	for _, ruleCount := range []int{1, 10, 50} {
+		b.Run(fmt.Sprintf("rules=%d", ruleCount), func(b *testing.B) {
+			rules, status := preservedStateTestInputs(ruleCount)
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := BuildPreservedLabelState(rules, status); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func preservedStateTestInputs(ruleCount int) (*policyv1alpha1.StatePreservation, []byte) {
+	rules := &policyv1alpha1.StatePreservation{}
+	for i := range ruleCount {
+		rules.Rules = append(rules.Rules, policyv1alpha1.StatePreservationRule{
+			AliasLabelName: fmt.Sprintf("checkpoint-%d", i),
+			JSONPath:       "{ .checkpoint }",
+		})
+	}
+	history := strings.Repeat(`{"checkpoint":1},`, 511) + `{"checkpoint":1}`
+	status := []byte(`{"checkpoint":9007199254740993,"history":[` + history + `]}`)
+	return rules, status
 }

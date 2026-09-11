@@ -30,8 +30,17 @@ import (
 // BuildPreservedLabelState builds preserved label state from the state preservation rules and raw status.
 func BuildPreservedLabelState(statePreservation *policyv1alpha1.StatePreservation, rawStatus []byte) (map[string]string, error) {
 	results := make(map[string]string, len(statePreservation.Rules))
+	if len(statePreservation.Rules) == 0 {
+		return results, nil
+	}
+	var status any
+	// Preserve integer state such as checkpoint IDs without float64 rounding.
+	if err := json.Unmarshal(rawStatus, &status); err != nil {
+		klog.ErrorS(err, "Failed to unmarshal application status", "status", string(rawStatus))
+		return nil, fmt.Errorf("failed to unmarshal rawStatus: %w", err)
+	}
 	for _, rule := range statePreservation.Rules {
-		value, err := parseJSONValue(rawStatus, rule.JSONPath)
+		value, err := parseJSONValue(status, rule.JSONPath)
 		if err != nil {
 			klog.ErrorS(err, "Failed to parse value with jsonPath from status",
 				"jsonPath", rule.JSONPath,
@@ -44,19 +53,14 @@ func BuildPreservedLabelState(statePreservation *policyv1alpha1.StatePreservatio
 	return results, nil
 }
 
-func parseJSONValue(rawStatus []byte, jsonPath string) (string, error) {
+func parseJSONValue(status any, jsonPath string) (string, error) {
 	j := jsonpath.New(jsonPath)
 	j.AllowMissingKeys(false)
 	if err := j.Parse(jsonPath); err != nil {
 		return "", err
 	}
-	var unmarshalled any
-	// Preserve integer state such as checkpoint IDs without float64 rounding.
-	if err := json.Unmarshal(rawStatus, &unmarshalled); err != nil {
-		return "", fmt.Errorf("failed to unmarshal rawStatus: %w", err)
-	}
 	buf := new(bytes.Buffer)
-	if err := j.Execute(buf, unmarshalled); err != nil {
+	if err := j.Execute(buf, status); err != nil {
 		return "", fmt.Errorf("failed to execute jsonpath %q: %w", jsonPath, err)
 	}
 	return buf.String(), nil
