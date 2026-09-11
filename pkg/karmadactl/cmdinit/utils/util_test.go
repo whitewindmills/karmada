@@ -97,6 +97,44 @@ func TestDownloadFile(t *testing.T) {
 	}
 }
 
+func TestDownloadFileReplacesExistingContent(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{name: "shorter response truncates old bytes", status: http.StatusOK, body: "new", want: "new"},
+		{name: "longer response replaces content", status: http.StatusOK, body: "replacement content longer than before", want: "replacement content longer than before"},
+		{name: "HTTP failure leaves existing file intact", status: http.StatusServiceUnavailable, body: "unavailable", want: "previous content"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				if _, err := io.WriteString(w, tt.body); err != nil {
+					t.Errorf("failed to write test response: %v", err)
+				}
+			}))
+			defer server.Close()
+			destination := filepath.Join(t.TempDir(), "download")
+			if err := os.WriteFile(destination, []byte("previous content"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			err := DownloadFile(server.URL, destination)
+			if (err != nil) != (tt.status != http.StatusOK) {
+				t.Errorf("DownloadFile() error = %v, status %d", err, tt.status)
+			}
+			got, err := os.ReadFile(destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("download content = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestListFiles(t *testing.T) {
 	tests := []struct {
 		name      string

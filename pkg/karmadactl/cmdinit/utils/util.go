@@ -68,7 +68,7 @@ func DownloadFile(url, filePath string) error {
 		return fmt.Errorf("failed download file. url: %s code: %v", url, resp.StatusCode)
 	}
 
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, util.DefaultFilePerm)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, util.DefaultFilePerm)
 	if err != nil {
 		return err
 	}
