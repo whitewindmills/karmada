@@ -32,10 +32,10 @@ import (
 func EnsureWorksDeleted(controlPlaneKarmadaClient karmadaclientset.Interface, namespace string,
 	timeout time.Duration) error {
 	// make sure the works object under the given namespace has been deleted.
-	err := wait.PollUntilContextTimeout(context.TODO(), 1*time.Second, timeout, false, func(context.Context) (done bool, err error) {
-		list, err := controlPlaneKarmadaClient.WorkV1alpha1().Works(namespace).List(context.TODO(), metav1.ListOptions{})
+	err := wait.PollUntilContextTimeout(context.TODO(), 1*time.Second, timeout, false, func(ctx context.Context) (done bool, err error) {
+		list, err := controlPlaneKarmadaClient.WorkV1alpha1().Works(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return false, fmt.Errorf("failed to list work in namespace %s", namespace)
+			return false, fmt.Errorf("failed to list work in namespace %s: %w", namespace, err)
 		}
 
 		if len(list.Items) == 0 {
@@ -43,9 +43,9 @@ func EnsureWorksDeleted(controlPlaneKarmadaClient karmadaclientset.Interface, na
 		}
 		for i := range list.Items {
 			work := &list.Items[i]
-			err = controlPlaneKarmadaClient.WorkV1alpha1().Works(namespace).Delete(context.TODO(), work.GetName(), metav1.DeleteOptions{})
+			err = controlPlaneKarmadaClient.WorkV1alpha1().Works(namespace).Delete(ctx, work.GetName(), metav1.DeleteOptions{})
 			if err != nil && !apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("failed to delete the work(%s/%s)", namespace, work.GetName())
+				return false, fmt.Errorf("failed to delete the work(%s/%s): %w", namespace, work.GetName(), err)
 			}
 		}
 		return false, nil

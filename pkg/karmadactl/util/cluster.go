@@ -54,8 +54,8 @@ func DeleteClusterObject(controlPlaneKubeClient kubeclient.Interface, controlPla
 
 	// make sure the given cluster object has been deleted.
 	// If the operation times out and `forceDeletion` is true, then force deletion begins, which involves sequentially deleting the `work`, `executionSpace`, and `cluster` finalizers.
-	err = wait.PollUntilContextTimeout(context.TODO(), 1*time.Second, timeout, false, func(context.Context) (done bool, err error) {
-		_, err = controlPlaneKarmadaClient.ClusterV1alpha1().Clusters().Get(context.TODO(), clusterName, metav1.GetOptions{})
+	err = wait.PollUntilContextTimeout(context.TODO(), 1*time.Second, timeout, false, func(ctx context.Context) (done bool, err error) {
+		_, err = controlPlaneKarmadaClient.ClusterV1alpha1().Clusters().Get(ctx, clusterName, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
