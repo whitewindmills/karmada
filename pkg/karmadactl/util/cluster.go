@@ -19,6 +19,7 @@ package util
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -116,19 +117,27 @@ func removeWorkFinalizer(executionSpaceName string, controlPlaneKarmadaClient ka
 	return nil
 }
 
-// removeExecutionSpaceFinalizer removes the finalizer of executionSpace.
+// removeExecutionSpaceFinalizer removes the namespace controller's spec finalizer through the finalize subresource.
 func removeExecutionSpaceFinalizer(executionSpaceName string, controlPlaneKubeClient kubeclient.Interface) error {
 	executionSpace, err := controlPlaneKubeClient.CoreV1().Namespaces().Get(context.TODO(), executionSpaceName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get Namespace(%s)", executionSpaceName)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get Namespace(%s): %w", executionSpaceName, err)
 	}
 
-	if !controllerutil.ContainsFinalizer(executionSpace, string(corev1.FinalizerKubernetes)) {
+	if !slices.Contains(executionSpace.Spec.Finalizers, corev1.FinalizerKubernetes) {
 		return nil
 	}
 
-	controllerutil.RemoveFinalizer(executionSpace, "kubernetes")
-	_, err = controlPlaneKubeClient.CoreV1().Namespaces().Update(context.TODO(), executionSpace, metav1.UpdateOptions{})
+	executionSpace.Spec.Finalizers = slices.DeleteFunc(executionSpace.Spec.Finalizers, func(finalizer corev1.FinalizerName) bool {
+		return finalizer == corev1.FinalizerKubernetes
+	})
+	_, err = controlPlaneKubeClient.CoreV1().Namespaces().Finalize(context.TODO(), executionSpace, metav1.UpdateOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
 
 	return err
 }
