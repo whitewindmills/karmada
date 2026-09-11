@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -255,60 +256,68 @@ func (tc *NoExecuteTaintManager) syncBindingEviction(key util.QueueKey) error {
 	cluster := fedKey.Cluster
 	klog.V(4).InfoS("Begin syncing ResourceBinding for taint eviction", "binding", fedKey.ClusterWideKey.NamespaceKey(), "cluster", cluster)
 
-	binding := &workv1alpha2.ResourceBinding{}
-	if err := tc.Client.Get(context.TODO(), types.NamespacedName{Namespace: fedKey.Namespace, Name: fedKey.Name}, binding); err != nil {
-		// The resource no longer exist, in which case we stop processing.
-		if apierrors.IsNotFound(err) {
+	var failedBinding *workv1alpha2.ResourceBinding
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		failedBinding = nil
+		binding := &workv1alpha2.ResourceBinding{}
+		if err := tc.Client.Get(context.TODO(), types.NamespacedName{Namespace: fedKey.Namespace, Name: fedKey.Name}, binding); err != nil {
+			// The resource no longer exist, in which case we stop processing.
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get binding %s: %v", fedKey.NamespaceKey(), err)
+		}
+
+		if !binding.DeletionTimestamp.IsZero() || !binding.Spec.TargetContains(cluster) {
 			return nil
 		}
-		return fmt.Errorf("failed to get binding %s: %v", fedKey.NamespaceKey(), err)
-	}
 
-	if !binding.DeletionTimestamp.IsZero() || !binding.Spec.TargetContains(cluster) {
-		return nil
-	}
-
-	needEviction, tolerationTime, err := tc.needEviction(cluster, binding.Annotations)
-	if err != nil {
-		klog.ErrorS(err, "Failed to check if binding needs eviction", "binding", fedKey.ClusterWideKey.NamespaceKey())
-		return err
-	}
-
-	// Case 1: Need eviction right now.
-	// Case 2: Need eviction after toleration time.
-	// Case 3: Tolerate forever, we do nothing.
-	if needEviction {
-		var purgeMode policyv1alpha1.PurgeMode
-		var preservedLabelState map[string]string
-		purgeMode = tc.getPurgeMode(binding.Spec.Failover)
-		if features.FeatureGate.Enabled(features.StatefulFailoverInjection) {
-			if binding.Spec.Failover != nil && binding.Spec.Failover.Cluster != nil {
-				preservedLabelState, err = extractStateForEviction(binding.Spec.Failover.Cluster, binding.Status.AggregatedStatus, cluster)
-				if err != nil {
-					klog.ErrorS(err, "Failed to extract preserved label state for eviction", "binding", binding.Name, "cluster", cluster)
-					return err
-				}
-			}
-		}
-
-		// update final result to evict the target cluster
-		binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(
-			workv1alpha2.WithPurgeMode(purgeMode),
-			workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager),
-			workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated),
-			workv1alpha2.WithPreservedLabelState(preservedLabelState)))
-
-		if err = tc.Update(context.TODO(), binding); err != nil {
-			helper.EmitClusterEvictionEventForResourceBinding(binding, cluster, tc.EventRecorder, err)
-			klog.ErrorS(err, "Failed to update binding", "binding", klog.KObj(binding))
+		needEviction, tolerationTime, err := tc.needEviction(cluster, binding.Annotations)
+		if err != nil {
+			klog.ErrorS(err, "Failed to check if binding needs eviction", "binding", fedKey.ClusterWideKey.NamespaceKey())
 			return err
 		}
-		klog.V(2).InfoS("Evicted cluster from ResourceBinding", "cluster", fedKey.Cluster, "binding", fedKey.ClusterWideKey.NamespaceKey())
-	} else if tolerationTime > 0 {
-		tc.bindingEvictionWorker.AddAfter(fedKey, tolerationTime)
-	}
 
-	return nil
+		// Case 1: Need eviction right now.
+		// Case 2: Need eviction after toleration time.
+		// Case 3: Tolerate forever, we do nothing.
+		if needEviction {
+			var purgeMode policyv1alpha1.PurgeMode
+			var preservedLabelState map[string]string
+			purgeMode = tc.getPurgeMode(binding.Spec.Failover)
+			if features.FeatureGate.Enabled(features.StatefulFailoverInjection) {
+				if binding.Spec.Failover != nil && binding.Spec.Failover.Cluster != nil {
+					preservedLabelState, err = extractStateForEviction(binding.Spec.Failover.Cluster, binding.Status.AggregatedStatus, cluster)
+					if err != nil {
+						klog.ErrorS(err, "Failed to extract preserved label state for eviction", "binding", binding.Name, "cluster", cluster)
+						return err
+					}
+				}
+			}
+
+			// update final result to evict the target cluster
+			binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(
+				workv1alpha2.WithPurgeMode(purgeMode),
+				workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager),
+				workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated),
+				workv1alpha2.WithPreservedLabelState(preservedLabelState)))
+
+			if err = tc.Update(context.TODO(), binding); err != nil {
+				failedBinding = binding
+				return err
+			}
+			klog.V(2).InfoS("Evicted cluster from ResourceBinding", "cluster", fedKey.Cluster, "binding", fedKey.ClusterWideKey.NamespaceKey())
+		} else if tolerationTime > 0 {
+			tc.bindingEvictionWorker.AddAfter(fedKey, tolerationTime)
+		}
+
+		return nil
+	})
+	if failedBinding != nil {
+		helper.EmitClusterEvictionEventForResourceBinding(failedBinding, cluster, tc.EventRecorder, err)
+		klog.ErrorS(err, "Failed to update binding", "binding", klog.KObj(failedBinding))
+	}
+	return err
 }
 
 func (tc *NoExecuteTaintManager) syncClusterBindingEviction(key util.QueueKey) error {
@@ -321,60 +330,68 @@ func (tc *NoExecuteTaintManager) syncClusterBindingEviction(key util.QueueKey) e
 	cluster := fedKey.Cluster
 	klog.V(4).InfoS("Begin syncing ClusterResourceBinding with taintManager", "binding", fedKey.ClusterWideKey.NamespaceKey(), "cluster", cluster)
 
-	binding := &workv1alpha2.ClusterResourceBinding{}
-	if err := tc.Client.Get(context.TODO(), types.NamespacedName{Name: fedKey.Name}, binding); err != nil {
-		// The resource no longer exist, in which case we stop processing.
-		if apierrors.IsNotFound(err) {
+	var failedBinding *workv1alpha2.ClusterResourceBinding
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		failedBinding = nil
+		binding := &workv1alpha2.ClusterResourceBinding{}
+		if err := tc.Client.Get(context.TODO(), types.NamespacedName{Name: fedKey.Name}, binding); err != nil {
+			// The resource no longer exist, in which case we stop processing.
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get cluster binding %s: %v", fedKey.Name, err)
+		}
+
+		if !binding.DeletionTimestamp.IsZero() || !binding.Spec.TargetContains(cluster) {
 			return nil
 		}
-		return fmt.Errorf("failed to get cluster binding %s: %v", fedKey.Name, err)
-	}
 
-	if !binding.DeletionTimestamp.IsZero() || !binding.Spec.TargetContains(cluster) {
-		return nil
-	}
-
-	needEviction, tolerationTime, err := tc.needEviction(cluster, binding.Annotations)
-	if err != nil {
-		klog.ErrorS(err, "Failed to check if cluster binding needs eviction", "binding", binding.Name)
-		return err
-	}
-
-	// Case 1: Need eviction now.
-	// Case 2: Need eviction after toleration time.
-	// Case 3: Tolerate forever, we do nothing.
-	if needEviction {
-		var purgeMode policyv1alpha1.PurgeMode
-		var preservedLabelState map[string]string
-		purgeMode = tc.getPurgeMode(binding.Spec.Failover)
-		if features.FeatureGate.Enabled(features.StatefulFailoverInjection) {
-			if binding.Spec.Failover != nil && binding.Spec.Failover.Cluster != nil {
-				preservedLabelState, err = extractStateForEviction(binding.Spec.Failover.Cluster, binding.Status.AggregatedStatus, cluster)
-				if err != nil {
-					klog.ErrorS(err, "Failed to extract preserved label state for eviction", "binding", binding.Name, "cluster", cluster)
-					return err
-				}
-			}
-		}
-
-		// update final result to evict the target cluster
-		binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(
-			workv1alpha2.WithPurgeMode(purgeMode),
-			workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager),
-			workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated),
-			workv1alpha2.WithPreservedLabelState(preservedLabelState)))
-		if err = tc.Update(context.TODO(), binding); err != nil {
-			helper.EmitClusterEvictionEventForClusterResourceBinding(binding, cluster, tc.EventRecorder, err)
-			klog.ErrorS(err, "Failed to update cluster binding", "binding", binding.Name)
+		needEviction, tolerationTime, err := tc.needEviction(cluster, binding.Annotations)
+		if err != nil {
+			klog.ErrorS(err, "Failed to check if cluster binding needs eviction", "binding", binding.Name)
 			return err
 		}
-		klog.V(2).InfoS("Evicted cluster from ClusterResourceBinding", "cluster", fedKey.Cluster, "binding", fedKey.ClusterWideKey.NamespaceKey())
-	} else if tolerationTime > 0 {
-		tc.clusterBindingEvictionWorker.AddAfter(fedKey, tolerationTime)
-		return nil
-	}
 
-	return nil
+		// Case 1: Need eviction now.
+		// Case 2: Need eviction after toleration time.
+		// Case 3: Tolerate forever, we do nothing.
+		if needEviction {
+			var purgeMode policyv1alpha1.PurgeMode
+			var preservedLabelState map[string]string
+			purgeMode = tc.getPurgeMode(binding.Spec.Failover)
+			if features.FeatureGate.Enabled(features.StatefulFailoverInjection) {
+				if binding.Spec.Failover != nil && binding.Spec.Failover.Cluster != nil {
+					preservedLabelState, err = extractStateForEviction(binding.Spec.Failover.Cluster, binding.Status.AggregatedStatus, cluster)
+					if err != nil {
+						klog.ErrorS(err, "Failed to extract preserved label state for eviction", "binding", binding.Name, "cluster", cluster)
+						return err
+					}
+				}
+			}
+
+			// update final result to evict the target cluster
+			binding.Spec.GracefulEvictCluster(cluster, workv1alpha2.NewTaskOptions(
+				workv1alpha2.WithPurgeMode(purgeMode),
+				workv1alpha2.WithProducer(workv1alpha2.EvictionProducerTaintManager),
+				workv1alpha2.WithReason(workv1alpha2.EvictionReasonTaintUntolerated),
+				workv1alpha2.WithPreservedLabelState(preservedLabelState)))
+			if err = tc.Update(context.TODO(), binding); err != nil {
+				failedBinding = binding
+				return err
+			}
+			klog.V(2).InfoS("Evicted cluster from ClusterResourceBinding", "cluster", fedKey.Cluster, "binding", fedKey.ClusterWideKey.NamespaceKey())
+		} else if tolerationTime > 0 {
+			tc.clusterBindingEvictionWorker.AddAfter(fedKey, tolerationTime)
+			return nil
+		}
+
+		return nil
+	})
+	if failedBinding != nil {
+		helper.EmitClusterEvictionEventForClusterResourceBinding(failedBinding, cluster, tc.EventRecorder, err)
+		klog.ErrorS(err, "Failed to update cluster binding", "binding", failedBinding.Name)
+	}
+	return err
 }
 
 // getPurgeMode determines the purge mode based on the binding's failover spec and the taint manager's global config.
