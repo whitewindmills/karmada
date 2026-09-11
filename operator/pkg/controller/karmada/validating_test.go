@@ -21,8 +21,10 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -30,6 +32,41 @@ import (
 	operatorv1alpha1 "github.com/karmada-io/karmada/operator/pkg/apis/operator/v1alpha1"
 	"github.com/karmada-io/karmada/operator/pkg/util"
 )
+
+func TestValidateLoadBalancerClass(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		class   *string
+		wantErr bool
+	}{
+		{name: "default implementation"},
+		{name: "unprefixed", class: new("internal-vip")},
+		{name: "domain prefix", class: new("example.com/internal-vip")},
+		{name: "label-style suffix", class: new("example.com/Internal_VIP.v1")},
+		{name: "empty", class: new(""), wantErr: true},
+		{name: "empty prefix", class: new("/internal-vip"), wantErr: true},
+		{name: "empty suffix", class: new("example.com/"), wantErr: true},
+		{name: "invalid domain", class: new("Example.com/internal-vip"), wantErr: true},
+		{name: "invalid suffix", class: new("example.com/internal vip"), wantErr: true},
+		{name: "multiple separators", class: new("example.com/internal/vip"), wantErr: true},
+		{name: "long suffix", class: new("example.com/" + strings.Repeat("a", 64)), wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &operatorv1alpha1.KarmadaAPIServer{
+				ServiceType: corev1.ServiceTypeLoadBalancer, LoadBalancerClass: tt.class,
+			}
+			errs := validateKarmadaAPIServer(cfg, nil, field.NewPath("spec", "components", "karmadaAPIServer"))
+			if (len(errs) > 0) != tt.wantErr {
+				t.Fatalf("validation errors = %v, want error = %v", errs, tt.wantErr)
+			}
+			for _, err := range errs {
+				if err.Field != "spec.components.karmadaAPIServer.loadBalancerClass" {
+					t.Errorf("unexpected validation field: %s", err.Field)
+				}
+			}
+		})
+	}
+}
 
 func Test_validate(t *testing.T) {
 	karmadaType := metav1.TypeMeta{Kind: "Karmada", APIVersion: "operator.karmada.io/v1alpha1"}

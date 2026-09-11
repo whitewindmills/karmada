@@ -24,12 +24,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/klog/v2"
 
 	operatorv1alpha1 "github.com/karmada-io/karmada/operator/pkg/apis/operator/v1alpha1"
 	"github.com/karmada-io/karmada/operator/pkg/util"
-	"github.com/karmada-io/karmada/pkg/util/lifted"
 )
 
 func validateCRDTarball(crdTarball *operatorv1alpha1.CRDTarball, fldPath *field.Path) (errs field.ErrorList) {
@@ -64,7 +64,7 @@ func validateKarmadaAPIServer(karmadaAPIServer *operatorv1alpha1.KarmadaAPIServe
 		errs = append(errs, field.Invalid(fldPath.Child("serviceType"), serviceType, "unsupported service type for Karmada API server"))
 	}
 	if serviceType == corev1.ServiceTypeLoadBalancer && karmadaAPIServer.LoadBalancerClass != nil {
-		errs = append(errs, lifted.ValidateDNS1123Label(*karmadaAPIServer.LoadBalancerClass, fldPath.Child("loadBalancerClass"))...)
+		errs = append(errs, metav1validation.ValidateLabelName(*karmadaAPIServer.LoadBalancerClass, fldPath.Child("loadBalancerClass"))...)
 	}
 	if !util.IsInCluster(hostCluster) && serviceType == corev1.ServiceTypeClusterIP {
 		errs = append(errs, field.Invalid(fldPath.Child("serviceType"), serviceType, "if karmada is installed in a remote cluster, the service type of karmada-apiserver must be either NodePort or LoadBalancer"))
