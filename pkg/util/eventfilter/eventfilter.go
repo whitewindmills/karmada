@@ -17,6 +17,7 @@ limitations under the License.
 package eventfilter
 
 import (
+	"maps"
 	"reflect"
 	"strings"
 
@@ -36,8 +37,8 @@ var labelsForUserWithKarmadaPrefix = map[string]struct{}{
 
 // SpecificationChanged check if the specification of the given object change or not
 func SpecificationChanged(oldObj, newObj *unstructured.Unstructured) bool {
-	oldBackup := oldObj.DeepCopy()
-	newBackup := newObj.DeepCopy()
+	oldBackup := copyForComparison(oldObj)
+	newBackup := copyForComparison(newObj)
 
 	removeIgnoredFields(oldBackup, newBackup)
 
@@ -47,14 +48,31 @@ func SpecificationChanged(oldObj, newObj *unstructured.Unstructured) bool {
 // ResourceChangeByKarmada check if the change of the object is modified by Karmada.
 // If oldObj deep equal to newObj after removing fields changed by Karmada, such change refers to ChangeByKarmada.
 func ResourceChangeByKarmada(oldObj, newObj *unstructured.Unstructured) bool {
-	oldBackup := oldObj.DeepCopy()
-	newBackup := newObj.DeepCopy()
+	oldBackup := copyForComparison(oldObj)
+	newBackup := copyForComparison(newObj)
 
 	removeIgnoredFields(oldBackup, newBackup)
 
 	removeFieldsChangedByKarmada(oldBackup, newBackup)
 
 	return reflect.DeepEqual(oldBackup, newBackup)
+}
+
+// copyForComparison copies only maps the filters mutate. Other fields are compared read-only.
+func copyForComparison(obj *unstructured.Unstructured) *unstructured.Unstructured {
+	result := &unstructured.Unstructured{Object: maps.Clone(obj.Object)}
+	metadata, ok := result.Object["metadata"].(map[string]any)
+	if !ok {
+		return result
+	}
+	metadata = maps.Clone(metadata)
+	result.Object["metadata"] = metadata
+	for _, field := range []string{"labels", "annotations"} {
+		if values, ok := metadata[field].(map[string]any); ok {
+			metadata[field] = maps.Clone(values)
+		}
+	}
+	return result
 }
 
 // removeIgnoredFields Remove the status and some system defined mutable fields in metadata, including managedFields and resourceVersion.

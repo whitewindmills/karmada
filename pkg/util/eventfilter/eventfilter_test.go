@@ -17,6 +17,8 @@ limitations under the License.
 package eventfilter
 
 import (
+	"fmt"
+	"reflect"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,6 +32,86 @@ import (
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	"github.com/karmada-io/karmada/pkg/util/helper"
 )
+
+var comparisonFilters = []struct {
+	name string
+	fn   func(*unstructured.Unstructured, *unstructured.Unstructured) bool
+	want bool
+}{
+	{name: "SpecificationChanged", fn: SpecificationChanged},
+	{name: "ResourceChangeByKarmada", fn: ResourceChangeByKarmada, want: true},
+}
+
+func TestComparisonIgnoresStatusAllocationSize(t *testing.T) {
+	for _, filter := range comparisonFilters {
+		t.Run(filter.name, func(t *testing.T) {
+			allocations := func(statusFields int) float64 {
+				t.Helper()
+				oldObj := comparisonTestResource(statusFields)
+				newObj := oldObj.DeepCopy()
+				newObj.SetResourceVersion("2")
+				oldSnapshot, newSnapshot := oldObj.DeepCopy(), newObj.DeepCopy()
+				var result bool
+				count := testing.AllocsPerRun(5, func() {
+					result = filter.fn(oldObj, newObj)
+				})
+				if result != filter.want {
+					t.Errorf("comparison = %v, want %v", result, filter.want)
+				}
+				if !reflect.DeepEqual(oldObj, oldSnapshot) || !reflect.DeepEqual(newObj, newSnapshot) {
+					t.Error("comparison mutated an informer-owned resource")
+				}
+				return count
+			}
+			small, large := allocations(0), allocations(512)
+			if large > small+2 {
+				t.Errorf("large ignored status used %.0f allocations versus %.0f for empty status", large, small)
+			}
+		})
+	}
+}
+
+func BenchmarkResourceComparison(b *testing.B) {
+	for _, filter := range comparisonFilters {
+		b.Run(filter.name, func(b *testing.B) {
+			oldObj := comparisonTestResource(512)
+			newObj := oldObj.DeepCopy()
+			newObj.SetResourceVersion("2")
+			b.ReportAllocs()
+			for b.Loop() {
+				filter.fn(oldObj, newObj)
+			}
+		})
+	}
+}
+
+func comparisonTestResource(statusFields int) *unstructured.Unstructured {
+	status := make(map[string]any, statusFields)
+	for i := range statusFields {
+		status[fmt.Sprintf("field-%d", i)] = map[string]any{"value": int64(i)}
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "example.com/v1",
+		"kind":       "Workload",
+		"metadata": map[string]any{
+			"name":            "test",
+			"namespace":       "default",
+			"resourceVersion": "1",
+			"generation":      int64(1),
+			"labels": map[string]any{
+				"app":                    "test",
+				"app.karmada.io/managed": "true",
+			},
+			"annotations": map[string]any{
+				"example.com/value":      "keep",
+				"policy.karmada.io/name": "policy",
+			},
+			"managedFields": []any{map[string]any{"manager": "controller"}},
+		},
+		"spec":   map[string]any{"replicas": int64(1)},
+		"status": status,
+	}}
+}
 
 func TestResourceChangeByKarmadaMetadataNamespace(t *testing.T) {
 	tests := []struct {
