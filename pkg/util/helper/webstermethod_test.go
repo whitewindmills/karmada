@@ -346,3 +346,36 @@ func TestWebsterPriorityQueueLessLargeSeatCounts(t *testing.T) {
 		})
 	}
 }
+
+func TestAllocateWebsterSeatsAllocations(t *testing.T) {
+	votes := map[string]int64{"PartyA": 100, "PartyB": 80, "PartyC": 30}
+	allocations := testing.AllocsPerRun(10, func() {
+		AllocateWebsterSeats(1000, votes, nil, nil)
+	})
+	// Allocations should depend on the parties, not on the number of seats.
+	if allocations > 20 {
+		t.Errorf("allocating 1000 seats used %.0f allocations, want at most 20", allocations)
+	}
+}
+
+func BenchmarkAllocateWebsterSeats(b *testing.B) {
+	for _, tc := range []struct {
+		parties int
+		seats   int32
+	}{
+		{parties: 1, seats: 10000},
+		{parties: 10, seats: 1000},
+		{parties: 100, seats: 10000},
+	} {
+		b.Run(fmt.Sprintf("parties=%d/seats=%d", tc.parties, tc.seats), func(b *testing.B) {
+			votes := make(map[string]int64, tc.parties)
+			for i := range tc.parties {
+				votes[fmt.Sprintf("party-%03d", i)] = int64(i + 1)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				AllocateWebsterSeats(tc.seats, votes, nil, nil)
+			}
+		})
+	}
+}
