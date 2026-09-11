@@ -40,12 +40,17 @@ reflect the actual Flink memory allocation.
 See [Flink MemorySize](https://github.com/apache/flink/blob/release-1.20/flink-core-api/src/main/java/org/apache/flink/configuration/MemorySize.java)
 and the operator's [resource memory conversion](https://github.com/apache/flink-kubernetes-operator/blob/38a9f197465082a5f5987653b9497d7e5aef384a/flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/utils/ResourceConfigUtils.java).
 
-## Spark CPU requests
+## Spark resource requests
 
 SparkApplication component accounting uses `driver.coreRequest` and
 `executor.coreRequest` when specified. These are Kubernetes CPU requests and may
 use fractional quantities such as `250m`. Otherwise, the interpreter uses `cores`
 or the default of one core; `coreLimit` is not a resource request.
+
+Heap memory and memory overhead are converted to whole MiB, matching Spark's Pod
+requests. Unitless memory values mean MiB, while byte and KiB values are truncated
+to MiB before overhead is added. Fractional heap sizes are invalid; fractional
+overhead factors are applied with Spark's integer-MiB rounding.
 
 ## How to test
 

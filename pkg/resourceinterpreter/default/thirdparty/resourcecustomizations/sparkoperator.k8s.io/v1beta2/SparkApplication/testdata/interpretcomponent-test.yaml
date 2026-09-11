@@ -92,13 +92,13 @@ output:
       replicaRequirements:
         resourceRequest:
           cpu: "1"
-          memory: "1433.600000Mi"
+          memory: "1433Mi"
     - name: executor
       replicas: 4
       replicaRequirements:
         resourceRequest:
           cpu: "1"
-          memory: "1433.600000Mi"
+          memory: "1433Mi"
 ---
 name: "SparkApplication interpret component with pod template"
 description: "NodeSelector and tolerations should propagate"

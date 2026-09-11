@@ -111,56 +111,34 @@ spec:
         local JVM_DEFAULT_OVERHEAD_FACTOR = 0.10
         local NON_JVM_DEFAULT_OVERHEAD_FACTOR = 0.40
 
-        local kube_unit_order = { B = 0, Ki = 1, Mi = 2, Gi = 3, Ti = 4, Pi = 5 }
-        local kube_unit_scale = { B = 1, Ki = 1024, Mi = 1024^2, Gi = 1024^3, Ti = 1024^4, Pi = 1024^5 }
+        local memory_mib_scale = {
+          [""] = 1, b = 1 / 1024^2,
+          k = 1 / 1024, kb = 1 / 1024, ki = 1 / 1024, kib = 1 / 1024,
+          m = 1, mb = 1, mi = 1, mib = 1,
+          g = 1024, gb = 1024, gi = 1024, gib = 1024,
+          t = 1024^2, tb = 1024^2, ti = 1024^2, tib = 1024^2,
+          p = 1024^3, pb = 1024^3, pi = 1024^3, pib = 1024^3,
+        }
 
-        local function parse_java_memory(java_mem_str)
-          local value_str, unit = tostring(java_mem_str):lower():match("^(%d+%.?%d*)([a-z]*)$")
-          local unit_map = {
-            b = "B",
-            kb = "Ki", k = "Ki",
-            mb = "Mi", m = "Mi",
-            gb = "Gi", g = "Gi",
-            tb = "Ti", t = "Ti",
-            pb = "Pi", p = "Pi",
-          }
-          local value = tonumber(value_str)
-          return value, unit_map[unit]
-        end
-        
-        local function convert_unit(value, from_unit, to_unit)
-          if from_unit == to_unit then return value end
-          local scale = kube_unit_scale[from_unit] / kube_unit_scale[to_unit]
-          return value * scale
-        end
-
-        local function smaller_unit(u1, u2)
-          return kube_unit_order[u1] < kube_unit_order[u2] and u1 or u2
+        local function parse_memory_mib(memory)
+          local value, unit = tostring(memory):lower():match("^%s*(%d+)([a-z]*)%s*$")
+          local scale = memory_mib_scale[unit]
+          if value == nil or scale == nil then
+            error("invalid Spark memory quantity: " .. tostring(memory))
+          end
+          -- Spark's byteStringAsMb uses MiB for unitless values and truncates smaller units.
+          return math.floor(tonumber(value) * scale)
         end
 
         local function calculate_total_memory_request(memory_str, overhead_str, memory_overhead_factor, min_memory_overhead)
-          local mem_value, mem_unit = parse_java_memory(memory_str)
-          local over_value, over_unit
-
+          local memory_mib = parse_memory_mib(memory_str)
+          local overhead_mib
           if overhead_str then
-            over_value, over_unit = parse_java_memory(overhead_str)
+            overhead_mib = parse_memory_mib(overhead_str)
           else
-            local overhead_calc = mem_value * memory_overhead_factor
-            local min_over_value, min_over_unit = parse_java_memory(min_memory_overhead)
-
-            local smaller_u = smaller_unit(mem_unit, min_over_unit)
-            local overhead_calc_in_smaller = convert_unit(overhead_calc, mem_unit, smaller_u)
-            local min_over_in_smaller = convert_unit(min_over_value, min_over_unit, smaller_u)
-
-            over_value, over_unit = math.max(overhead_calc_in_smaller, min_over_in_smaller), smaller_u
+            overhead_mib = math.max(math.floor(memory_mib * memory_overhead_factor), parse_memory_mib(min_memory_overhead))
           end
-
-          local final_unit = smaller_unit(mem_unit, over_unit)
-          local mem_in_final = convert_unit(mem_value, mem_unit, final_unit)
-          local over_in_final = convert_unit(over_value, over_unit, final_unit)
-          local total_value = mem_in_final + over_in_final
-
-          return string.format("%f%s", total_value, final_unit)
+          return string.format("%.0fMi", memory_mib + overhead_mib)
         end
 
         function GetComponents(observedObj)
