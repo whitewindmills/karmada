@@ -271,6 +271,58 @@ func BenchmarkSimulateSchedulingZeroReplicas(b *testing.B) {
 	}
 }
 
+func TestSchedulingSimulatorNodeScanAllocations(t *testing.T) {
+	allocations := func(nodeCount int) float64 {
+		t.Helper()
+		simulator, components := saturatedComponentSimulation(nodeCount)
+		// Exclude scalar-name validation allocations to measure request-list construction.
+		delete(components[0].ReplicaRequirements.ResourceRequestBytes, "example.com/gpu")
+		var count int32
+		var err error
+		result := testing.AllocsPerRun(5, func() {
+			count, err = simulator.SimulateScheduling(components, 1)
+		})
+		if err != nil || count != 0 {
+			t.Fatalf("SimulateScheduling() = (%d, %v), want (0, nil)", count, err)
+		}
+		return result
+	}
+	single, multiple := allocations(1), allocations(100)
+	if multiple > single+2 {
+		t.Errorf("scanning 100 saturated nodes allocated %.0f objects versus %.0f for one node", multiple, single)
+	}
+}
+
+func BenchmarkSimulateSchedulingSaturatedNodes(b *testing.B) {
+	for _, nodeCount := range []int{100, 1000} {
+		b.Run(fmt.Sprintf("nodes=%d", nodeCount), func(b *testing.B) {
+			simulator, components := saturatedComponentSimulation(nodeCount)
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := simulator.SimulateScheduling(components, 1); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func saturatedComponentSimulation(nodeCount int) (*SchedulingSimulator, []*pb.Component) {
+	nodes := make([]*schedulerframework.NodeInfo, nodeCount)
+	for i := range nodes {
+		nodes[i] = &schedulerframework.NodeInfo{Allocatable: util.EmptyResource()}
+	}
+	components := []*pb.Component{{
+		Name: "workload", Replicas: 1,
+		ReplicaRequirements: (&pb.ComponentReplicaRequirements{}).MustSetResourceRequest(corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1"),
+			corev1.ResourceMemory: resource.MustParse("1Gi"),
+			"example.com/gpu":     resource.MustParse("1"),
+		}),
+	}}
+	return NewSchedulingSimulator(nodes), components
+}
+
 func TestSchedulingSimulator_SimulateSchedulingFF(t *testing.T) {
 	tests := []struct {
 		name         string

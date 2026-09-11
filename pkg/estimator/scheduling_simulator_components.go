@@ -123,6 +123,7 @@ func (s *SchedulingSimulator) scheduleComponent(component *pb.Component) (bool, 
 
 	requiredPerReplica := util.NewResource(res)
 	requiredPerReplica.AllowedPodNumber = 1
+	resourceRequest := requiredPerReplica.ResourceList()
 	remaining := component.Replicas
 
 	for _, node := range s.nodes {
@@ -130,7 +131,7 @@ func (s *SchedulingSimulator) scheduleComponent(component *pb.Component) (bool, 
 			continue
 		}
 
-		allocatable := node.Allocatable.MaxDivided(requiredPerReplica.ResourceList())
+		allocatable := node.Allocatable.MaxDivided(resourceRequest)
 		if allocatable == 0 {
 			continue
 		}
