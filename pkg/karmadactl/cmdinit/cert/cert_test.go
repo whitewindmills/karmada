@@ -33,13 +33,6 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/names"
 )
 
-const (
-	TestCertsTmp        = "./test-certs-tmp-without-ca-certificate"        //nolint
-	TestCertsTmpWithArg = "./test-certs-tmp-with-ca-certificate"           //nolint
-	TestCaCertPath      = "./test-certs-tmp-without-ca-certificate/ca.crt" //nolint
-	TestCaKeyPath       = "./test-certs-tmp-without-ca-certificate/ca.key" //nolint
-)
-
 var certFiles = []string{
 	"apiserver.crt", "apiserver.key",
 	"ca.crt", "ca.key",
@@ -52,8 +45,10 @@ var certFiles = []string{
 }
 
 func TestGenCerts(t *testing.T) {
-	defer os.RemoveAll(TestCertsTmp)
-	defer os.RemoveAll(TestCertsTmpWithArg)
+	certsDir := t.TempDir()
+	certsWithCADir := t.TempDir()
+	caCertPath := filepath.Join(certsDir, "ca.crt")
+	caKeyPath := filepath.Join(certsDir, "ca.key")
 
 	notAfter := time.Now().Add(Duration365d * 10).UTC()
 	namespace := "kube-karmada"
@@ -121,25 +116,25 @@ func TestGenCerts(t *testing.T) {
 	apiserverCertCfg := NewCertConfig("karmada-apiserver", []string{""}, karmadaAltNames, &notAfter)
 	frontProxyClientCertCfg := NewCertConfig("front-proxy-client", []string{}, certutil.AltNames{}, &notAfter)
 
-	if err := GenCerts(TestCertsTmp, "", "", etcdServerCertConfig, etcdClientCertCfg, karmadaCertCfg, apiserverCertCfg, frontProxyClientCertCfg); err != nil {
+	if err := GenCerts(certsDir, "", "", etcdServerCertConfig, etcdClientCertCfg, karmadaCertCfg, apiserverCertCfg, frontProxyClientCertCfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkCertFiles(TestCertsTmp, certFiles); err != nil {
+	if err := checkCertFiles(certsDir, certFiles); err != nil {
 		t.Fatal(err)
 	} else {
 		klog.Infof("All certificate files are present without CA certificates address parameter exists")
 	}
 
-	if err := GenCerts(TestCertsTmpWithArg, TestCaCertPath, TestCaKeyPath, etcdServerCertConfig, etcdClientCertCfg, karmadaCertCfg, apiserverCertCfg, frontProxyClientCertCfg); err != nil {
+	if err := GenCerts(certsWithCADir, caCertPath, caKeyPath, etcdServerCertConfig, etcdClientCertCfg, karmadaCertCfg, apiserverCertCfg, frontProxyClientCertCfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkCertFiles(TestCertsTmpWithArg, certFiles); err != nil {
+	if err := checkCertFiles(certsWithCADir, certFiles); err != nil {
 		t.Fatal(err)
 	} else {
 		klog.Infof("All certificate files are present with CA certificates address parameter exists")
 	}
 
-	if ok, err := compareCertFilesInDirs(TestCertsTmp, TestCertsTmpWithArg, "ca.crt"); !ok || err != nil {
+	if ok, err := compareCertFilesInDirs(certsDir, certsWithCADir, "ca.crt"); !ok || err != nil {
 		t.Fatal(err)
 	} else {
 		klog.Infof("The certificate files in the two directories are the same")
