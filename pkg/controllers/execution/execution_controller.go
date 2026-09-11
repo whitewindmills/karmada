@@ -243,6 +243,7 @@ func (c *Controller) cleanupPolicyClaimMetadata(ctx context.Context, work *workv
 		clusterObj, err := helper.GetObjectFromCache(c.RESTMapper, c.InformerManager, fedKey)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
+				c.ObjectWatcher.ForgetVersionRecord(cluster.Name, workload)
 				continue
 			}
 			klog.ErrorS(err, "Failed to get the resource from member cluster cache", "kind", workload.GetKind(), "namespace", workload.GetNamespace(), "name", workload.GetName(), "cluster", cluster.Name)
@@ -251,6 +252,7 @@ func (c *Controller) cleanupPolicyClaimMetadata(ctx context.Context, work *workv
 
 		// An earlier finalization attempt may already have released this resource.
 		if util.GetLabelValue(clusterObj.GetLabels(), util.ManagedByKarmadaLabel) != util.ManagedByKarmadaLabelValue {
+			c.ObjectWatcher.ForgetVersionRecord(cluster.Name, workload)
 			continue
 		}
 
@@ -266,11 +268,13 @@ func (c *Controller) cleanupPolicyClaimMetadata(ctx context.Context, work *workv
 		metrics.CountUpdateResourceToCluster(err, workload.GetAPIVersion(), workload.GetKind(), cluster.Name, string(operationResult))
 		if err != nil {
 			if apierrors.IsNotFound(err) {
+				c.ObjectWatcher.ForgetVersionRecord(cluster.Name, workload)
 				continue
 			}
 			klog.ErrorS(err, "Failed to update metadata in the given member cluster", "cluster", cluster.Name)
 			return err
 		}
+		c.ObjectWatcher.ForgetVersionRecord(cluster.Name, workload)
 	}
 
 	return nil

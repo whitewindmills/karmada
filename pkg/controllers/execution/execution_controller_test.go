@@ -332,15 +332,17 @@ func TestPreservationCleanupSkipsMissingResources(t *testing.T) {
 			controlClient := fake.NewClientBuilder().WithScheme(gclient.NewSchema()).WithObjects(cluster, work).Build()
 			indexer := toolscache.NewIndexer(toolscache.MetaNamespaceKeyFunc, toolscache.Indexers{})
 			require.NoError(t, indexer.Add(second))
-			objects := []runtime.Object{second}
 			if !tt.missing {
 				require.NoError(t, indexer.Add(first))
-				objects = append(objects, first)
 			}
-			memberClient := dynamicfake.NewSimpleDynamicClient(scheme.Scheme, objects...)
+			memberClient := dynamicfake.NewSimpleDynamicClient(scheme.Scheme, first, second)
 			gvr := corev1.SchemeGroupVersion.WithResource("pods")
 			denied := apierrors.NewForbidden(gvr.GroupResource(), first.GetName(), fmt.Errorf("access denied"))
+			seeding := true
 			memberClient.PrependReactor("update", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				if seeding {
+					return false, nil, nil
+				}
 				obj := action.(clienttesting.UpdateAction).GetObject().(*unstructured.Unstructured)
 				if obj.GetName() != first.GetName() {
 					return false, nil, nil
@@ -372,6 +374,17 @@ func TestPreservationCleanupSkipsMissingResources(t *testing.T) {
 				ObjectWatcher: objectwatcher.NewObjectWatcher(controlClient, mapper, clusterClient, nil,
 					FakeResourceInterpreter{DefaultInterpreter: native.NewDefaultInterpreter()}, manager),
 			}
+			for _, object := range []*unstructured.Unstructured{first, second} {
+				_, err := controller.ObjectWatcher.Update(t.Context(), clusterName, object.DeepCopy(), object)
+				require.NoError(t, err)
+				_, recorded := controller.ObjectWatcher.GetVersionRecord(clusterName, object)
+				require.True(t, recorded)
+			}
+			seeding = false
+			if tt.missing {
+				require.NoError(t, memberClient.Tracker().Delete(gvr, first.GetNamespace(), first.GetName()))
+			}
+			memberClient.ClearActions()
 			request := controllerruntime.Request{NamespacedName: client.ObjectKeyFromObject(work)}
 			_, err = controller.Reconcile(t.Context(), request)
 			wantErr := tt.lookupError || tt.updateDenied
@@ -389,6 +402,10 @@ func TestPreservationCleanupSkipsMissingResources(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, wantErr, remaining.GetLabels()[util.ManagedByKarmadaLabel] == util.ManagedByKarmadaLabelValue,
 				"a missing earlier manifest must not skip cleanup of surviving resources")
+			for _, object := range []*unstructured.Unstructured{first, second} {
+				_, recorded := controller.ObjectWatcher.GetVersionRecord(clusterName, object)
+				assert.Equal(t, wantErr, recorded, "only completed preservation cleanup should forget version records")
+			}
 			for _, action := range memberClient.Actions() {
 				assert.NotContains(t, []string{"create", "delete"}, action.GetVerb(),
 					"preservation cleanup must neither recreate nor delete member resources")
@@ -420,7 +437,7 @@ func TestPreservationCleanupLeavesUnmanagedResourcesUntouched(t *testing.T) {
 				observed.SetLabels(map[string]string{"owner": "member"})
 				observed.SetAnnotations(map[string]string{"example.com/config": "member"})
 			}
-			memberClient := dynamicfake.NewSimpleDynamicClient(scheme.Scheme, observed)
+			memberClient := dynamicfake.NewSimpleDynamicClient(scheme.Scheme, desired)
 			indexer := toolscache.NewIndexer(toolscache.MetaNamespaceKeyFunc, toolscache.Indexers{})
 			require.NoError(t, indexer.Add(observed))
 			manager := genericmanagerfake.NewFakeMultiClusterInformerManager(map[string]genericmanager.SingleClusterInformerManager{
@@ -452,6 +469,13 @@ func TestPreservationCleanupLeavesUnmanagedResourcesUntouched(t *testing.T) {
 				ObjectWatcher: objectwatcher.NewObjectWatcher(controlClient, mapper, clusterClient, nil,
 					FakeResourceInterpreter{DefaultInterpreter: native.NewDefaultInterpreter()}, manager),
 			}
+			_, err = controller.ObjectWatcher.Update(t.Context(), clusterName, desired.DeepCopy(), desired)
+			require.NoError(t, err)
+			_, recorded := controller.ObjectWatcher.GetVersionRecord(clusterName, desired)
+			require.True(t, recorded)
+			if alreadyUnmanaged {
+				require.NoError(t, memberClient.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), observed, observed.GetNamespace()))
+			}
 			request := controllerruntime.Request{NamespacedName: client.ObjectKeyFromObject(work)}
 			resourceClient := memberClient.Resource(corev1.SchemeGroupVersion.WithResource("pods")).Namespace(desired.GetNamespace())
 			if !alreadyUnmanaged {
@@ -466,6 +490,8 @@ func TestPreservationCleanupLeavesUnmanagedResourcesUntouched(t *testing.T) {
 			_, err = controller.Reconcile(t.Context(), request)
 			require.NoError(t, err)
 			assert.True(t, apierrors.IsNotFound(controlClient.Get(t.Context(), request.NamespacedName, work)))
+			_, recorded = controller.ObjectWatcher.GetVersionRecord(clusterName, desired)
+			assert.False(t, recorded, "released resource versions must not outlive their Work")
 			actual, err := resourceClient.Get(t.Context(), desired.GetName(), metav1.GetOptions{})
 			require.NoError(t, err)
 			assert.Equal(t, observed, actual)
@@ -709,6 +735,10 @@ func (s *stubObjectWatcher) Delete(_ context.Context, _ string, _ *unstructured.
 }
 func (s *stubObjectWatcher) GetVersionRecord(_ string, _ client.Object) (string, bool) {
 	return s.versionRecord, s.recordExists
+}
+
+func (s *stubObjectWatcher) ForgetVersionRecord(_ string, _ client.Object) {
+	s.versionRecord, s.recordExists = "", false
 }
 
 func TestWorkKeyFromWorkload(t *testing.T) {

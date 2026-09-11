@@ -109,6 +109,35 @@ func TestDeleteCleansUpVersionRecord(t *testing.T) {
 	}
 }
 
+func TestForgetVersionRecordDoesNotTouchMemberResources(t *testing.T) {
+	object := &unstructured.Unstructured{}
+	object.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("ConfigMap"))
+	object.SetNamespace("default")
+	object.SetName("preserved")
+	object.SetResourceVersion("1")
+	another := object.DeepCopy()
+	another.SetName("another")
+	watcher := &objectWatcherImpl{VersionRecord: make(map[string]map[string]string)}
+	watcher.recordVersion(object, "member")
+	watcher.recordVersion(another, "member")
+	watcher.recordVersion(object, "other-member")
+
+	for range 2 {
+		watcher.ForgetVersionRecord("member", object)
+		_, exists := watcher.GetVersionRecord("member", object)
+		assert.False(t, exists)
+	}
+	version, exists := watcher.GetVersionRecord("member", another)
+	assert.True(t, exists)
+	assert.Equal(t, "1", version)
+	version, exists = watcher.GetVersionRecord("other-member", object)
+	assert.True(t, exists)
+	assert.Equal(t, "1", version)
+	watcher.ForgetVersionRecord("member", another)
+	assert.NotContains(t, watcher.VersionRecord, "member")
+	assert.Contains(t, watcher.VersionRecord, "other-member")
+}
+
 func TestDeleteUsesObservedUID(t *testing.T) {
 	for _, tt := range []struct {
 		name        string

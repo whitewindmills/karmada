@@ -58,6 +58,7 @@ type ObjectWatcher interface {
 	Update(ctx context.Context, clusterName string, desireObj, clusterObj *unstructured.Unstructured) (operationResult OperationResult, err error)
 	Delete(ctx context.Context, clusterName string, desireObj *unstructured.Unstructured) error
 	GetVersionRecord(clusterName string, object client.Object) (string, bool)
+	ForgetVersionRecord(clusterName string, object client.Object)
 }
 
 type objectWatcherImpl struct {
@@ -268,8 +269,8 @@ func (o *objectWatcherImpl) Delete(ctx context.Context, clusterName string, desi
 	return nil
 }
 
-func (o *objectWatcherImpl) genObjectKey(obj *unstructured.Unstructured) string {
-	return obj.GroupVersionKind().String() + "/" + obj.GetNamespace() + "/" + obj.GetName()
+func (o *objectWatcherImpl) genObjectKey(obj client.Object) string {
+	return obj.GetObjectKind().GroupVersionKind().String() + "/" + obj.GetNamespace() + "/" + obj.GetName()
 }
 
 // recordVersion will add or update resource version records
@@ -305,7 +306,12 @@ func (o *objectWatcherImpl) deleteVersionRecord(clusterName, resourceName string
 }
 
 func (o *objectWatcherImpl) GetVersionRecord(clusterName string, object client.Object) (string, bool) {
-	return o.getVersionRecord(clusterName, object.GetObjectKind().GroupVersionKind().String()+"/"+object.GetNamespace()+"/"+object.GetName())
+	return o.getVersionRecord(clusterName, o.genObjectKey(object))
+}
+
+// ForgetVersionRecord releases change tracking without modifying the member resource.
+func (o *objectWatcherImpl) ForgetVersionRecord(clusterName string, object client.Object) {
+	o.deleteVersionRecord(clusterName, o.genObjectKey(object))
 }
 
 func (o *objectWatcherImpl) isManagedResource(clusterObj *unstructured.Unstructured) bool {
