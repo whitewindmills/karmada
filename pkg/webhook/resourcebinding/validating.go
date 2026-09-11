@@ -424,13 +424,13 @@ func isResourceRequestChanged(oldRB, newRB *workv1alpha2.ResourceBinding) bool {
 }
 
 func isScheduledReplicasChanged(oldRB, newRB *workv1alpha2.ResourceBinding) bool {
-	oldScheduledReplicas := int32(0)
+	oldScheduledReplicas := int64(0)
 	for _, c := range oldRB.Spec.Clusters {
-		oldScheduledReplicas += c.Replicas
+		oldScheduledReplicas += int64(c.Replicas)
 	}
-	newScheduledReplicas := int32(0)
+	newScheduledReplicas := int64(0)
 	for _, c := range newRB.Spec.Clusters {
-		newScheduledReplicas += c.Replicas
+		newScheduledReplicas += int64(c.Replicas)
 	}
 	return oldScheduledReplicas != newScheduledReplicas
 }

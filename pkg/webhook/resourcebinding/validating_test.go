@@ -336,6 +336,15 @@ func TestValidatingAdmission_Handle(t *testing.T) {
 		WithReplicaRequirements(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1m")}),
 	)
 	rbLargeReplicas.Spec.Replicas = math.MaxInt32
+	rbOverflowUpdateOld := makeTestRB("quota-ns", "rb-overflow-update",
+		WithClusters([]workv1alpha2.TargetCluster{{Name: "m1"}, {Name: "m2"}, {Name: "m3"}, {Name: "m4"}}),
+		WithReplicaRequirements(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1m")}),
+	)
+	rbOverflowUpdateNew := rbOverflowUpdateOld.DeepCopy()
+	rbOverflowUpdateNew.Spec.Replicas = 1 << 30
+	for i := range rbOverflowUpdateNew.Spec.Clusters {
+		rbOverflowUpdateNew.Spec.Clusters[i].Replicas = 1 << 30
+	}
 
 	// For: "update passes quota (allowed response, non-dryrun)"
 	frqForUpdatePassNonDryRun := makeTestFRQ("quota-ns", "frq-update-pass-nondryrun",
@@ -555,6 +564,17 @@ func TestValidatingAdmission_Handle(t *testing.T) {
 			clientObjects: []client.Object{frqForCreateExceeds},
 			enableFederatedQuotaEnforcementFeatureGate: true,
 			wantResponse: quotaExceededResponse("FederatedResourceQuota(quota-ns/frq-create-exceeds) exceeded for resource cpu: requested sum 4294967294m, limit 150m."),
+		},
+		{
+			name: "replica update differing by 2^32 must not skip quota",
+			req: newAdmissionRequestBuilder(t, admissionv1.Update, rbOverflowUpdateNew.Namespace, rbOverflowUpdateNew.Name, "overflow-update").
+				WithObject(rbOverflowUpdateNew).
+				WithOldObject(rbOverflowUpdateOld).
+				Build(),
+			decoder:       &fakeDecoder{decodeObj: rbOverflowUpdateNew, rawDecodedObj: rbOverflowUpdateOld},
+			clientObjects: []client.Object{frqForCreateExceeds},
+			enableFederatedQuotaEnforcementFeatureGate: true,
+			wantResponse: quotaExceededResponse("FederatedResourceQuota(quota-ns/frq-create-exceeds) exceeded for resource cpu: requested sum 4294967296m, limit 150m."),
 		},
 		{
 			name: "update passes quota (allowed response, non-dryrun)",
@@ -936,12 +956,34 @@ func TestIsResourceRequestChanged(t *testing.T) {
 }
 
 func TestIsScheduledReplicasChanged(t *testing.T) {
+	large := makeTestRB("default", "test", WithClusters([]workv1alpha2.TargetCluster{
+		{Name: "c1", Replicas: 1 << 30}, {Name: "c2", Replicas: 1 << 30},
+		{Name: "c3", Replicas: 1 << 30}, {Name: "c4", Replicas: 1 << 30},
+	}))
 	tests := []struct {
 		name   string
 		oldRB  *workv1alpha2.ResourceBinding
 		newRB  *workv1alpha2.ResourceBinding
 		expect bool
 	}{
+		{
+			name:   "increase by 2^32 is a change",
+			oldRB:  makeTestRB("default", "test"),
+			newRB:  large,
+			expect: true,
+		},
+		{
+			name:   "decrease by 2^32 is a change",
+			oldRB:  large,
+			newRB:  makeTestRB("default", "test"),
+			expect: true,
+		},
+		{
+			name:   "equal large totals remain unchanged",
+			oldRB:  large,
+			newRB:  large.DeepCopy(),
+			expect: false,
+		},
 		{
 			name: "no clusters in both should return false",
 			oldRB: makeTestRB("default", "test",
