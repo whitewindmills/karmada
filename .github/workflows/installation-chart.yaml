@@ -91,6 +91,9 @@ jobs:
 
           rm post-render.sh all.yaml kustomization.yaml
 
+      - name: Verify post-delete resource scope
+        run: go test ./test/helm -count=1 -timeout=120s
+
       # Python is required because `ct lint` runs Yamale (https://github.com/23andMe/Yamale) and
       # yamllint (https://github.com/adrienverge/yamllint) which require Python
       - name: Set up Python

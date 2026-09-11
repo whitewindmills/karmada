@@ -179,14 +179,19 @@ helm uninstall karmada -n karmada-system
 
 The command removes all the Kubernetes components associated with the chart and deletes the release.
 
+The host namespaces are preserved, including the release namespace and any namespaces named
+`systemNamespace` or `karmada-cluster`. The post-delete hook cleans up the release's host ConfigMaps
+without deleting the control-plane resources described inside them.
+
 > **Note**: There are some RBAC resources that are used by the `preJob` that can not be deleted by the `uninstall` command above. You might have to clean them manually with tools like `kubectl`.  You can clean them by commands:
 
 ```console
 kubectl delete sa/karmada-hook-job -nkarmada-system
 kubectl delete clusterRole/karmada-hook-job
 kubectl delete clusterRoleBinding/karmada-hook-job
-kubectl delete ns karmada-system
 ```
+
+Delete the release namespace separately only if it is no longer needed and contains no unrelated resources.
 
 ## Example
 
