@@ -268,3 +268,96 @@ func TestMultiClusterCache_ResourceExpansionInvalidatesWatches(t *testing.T) {
 		})
 	}
 }
+
+type blockingWatchStorage struct {
+	storage.Interface
+	started chan struct{}
+	release chan struct{}
+	source  *watch.RaceFreeFakeWatcher
+}
+
+func (s *blockingWatchStorage) Watch(ctx context.Context, _ string, _ storage.ListOptions) (watch.Interface, error) {
+	close(s.started)
+	select {
+	case <-s.release:
+		return s.source, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestMultiClusterCache_TopologyChangeDuringWatchSetup(t *testing.T) {
+	tests := []struct {
+		name           string
+		resource       schema.GroupVersionResource
+		wantInvalidate bool
+	}{
+		{name: "a new watched source cannot be missed", resource: podGVR, wantInvalidate: true},
+		{name: "unrelated resources do not invalidate setup", resource: nodeGVR},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			s := &blockingWatchStorage{
+				started: make(chan struct{}),
+				release: make(chan struct{}),
+				source:  watch.NewRaceFreeFake(),
+			}
+			client := NewEnhancedFakeDynamicClientWithResourceVersion(scheme, "100")
+			cache := NewMultiClusterCache(func(string) (dynamic.Interface, error) { return client, nil }, restMapper)
+			cache.cache["cluster1"] = clusterCacheWithStorage(s)
+			existing := cache.cache["cluster1"].cache[podGVR]
+			existing.multiNS = &MultiNamespace{allNamespaces: true}
+			existing.Store.DestroyFunc = s.source.Stop
+			t.Cleanup(cache.Stop)
+
+			type watchResult struct {
+				watcher watch.Interface
+				err     error
+			}
+			resultCh := make(chan watchResult, 1)
+			go func() {
+				w, err := cache.Watch(ctx, podGVR, &metainternalversion.ListOptions{})
+				resultCh <- watchResult{watcher: w, err: err}
+			}()
+			select {
+			case <-s.started:
+			case <-ctx.Done():
+				t.Fatal("the original member watch was not started")
+			}
+
+			require.NoError(t, cache.UpdateCache(map[string]map[schema.GroupVersionResource]*MultiNamespace{
+				"cluster1": resourceSet(podGVR),
+				"cluster2": resourceSet(tt.resource),
+			}, map[schema.GroupVersionResource]struct{}{podGVR: {}, tt.resource: {}}))
+			require.NotNil(t, cache.cacheForClusterResource("cluster2", tt.resource))
+			close(s.release)
+
+			var result watchResult
+			select {
+			case result = <-resultCh:
+			case <-ctx.Done():
+				t.Fatal("watch setup did not complete")
+			}
+			require.NoError(t, result.err)
+			require.NotNil(t, result.watcher)
+			t.Cleanup(result.watcher.Stop)
+
+			if tt.wantInvalidate {
+				select {
+				case _, ok := <-result.watcher.ResultChan():
+					require.False(t, ok, "stale watch setup should reconnect rather than return incomplete events")
+				case <-ctx.Done():
+					t.Fatal("the watch missed the topology change that happened before registration")
+				}
+			} else {
+				select {
+				case <-result.watcher.ResultChan():
+					t.Fatal("a change to another resource must not invalidate this watch setup")
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+		})
+	}
+}

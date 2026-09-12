@@ -368,6 +368,7 @@ func (c *MultiClusterCache) Watch(ctx context.Context, gvr schema.GroupVersionRe
 
 	mux := newWatchMuxWithInvalidation()
 	clusters := c.getClusterNames()
+	sourceCaches := make(map[string]*resourceCache, len(clusters))
 	for i := range clusters {
 		cluster := clusters[i]
 		options.ResourceVersion = resourceVersion.get(cluster)
@@ -381,6 +382,7 @@ func (c *MultiClusterCache) Watch(ctx context.Context, gvr schema.GroupVersionRe
 			return nil, err
 		}
 
+		sourceCaches[cluster] = cache
 		mux.AddSource(w, func(e watch.Event) {
 			setObjectResourceVersionFunc(cluster, e.Object)
 			addCacheSourceAnnotation(e.Object, cluster)
@@ -388,7 +390,27 @@ func (c *MultiClusterCache) Watch(ctx context.Context, gvr schema.GroupVersionRe
 	}
 	mux.Start()
 
-	// Register this watch so we can invalidate it when cluster topology changes
+	// Keep the source snapshot check and registration atomic with cache updates.
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	currentSources := 0
+	sourcesChanged := false
+	for cluster, cc := range c.cache {
+		currentCache := cc.cacheForResource(gvr)
+		if currentCache == nil {
+			continue
+		}
+		currentSources++
+		if sourceCaches[cluster] != currentCache {
+			sourcesChanged = true
+			break
+		}
+	}
+	if sourcesChanged || currentSources != len(sourceCaches) {
+		mux.Invalidate()
+		return mux, nil
+	}
+
 	c.registerWatch(gvr, mux)
 	return mux, nil
 }
