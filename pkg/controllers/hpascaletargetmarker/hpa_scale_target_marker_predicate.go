@@ -64,14 +64,16 @@ func (r *HpaScaleTargetMarker) Update(e event.UpdateEvent) bool {
 		return false
 	}
 
-	// hpa scale ref changed, remove old hpa label and add to new hpa
-	if oldHPA.Spec.ScaleTargetRef.String() != newHPA.Spec.ScaleTargetRef.String() {
+	newPropagated := hasBeenPropagated(newHPA)
+	// Remove the old target's label when the HPA retargets or stops propagating.
+	if oldHPA.Spec.ScaleTargetRef.String() != newHPA.Spec.ScaleTargetRef.String() ||
+		(hasBeenPropagated(oldHPA) && !newPropagated) {
 		// if scale ref has label, remove label, otherwise skip
 		r.scaleTargetWorker.Add(labelEvent{deleteLabelEvent, oldHPA})
 	}
 
 	// if new hpa exist and has been propagated, add label to its scale ref resource
-	if hasBeenPropagated(newHPA) {
+	if newPropagated {
 		r.scaleTargetWorker.Add(labelEvent{addLabelEvent, newHPA})
 	}
 
