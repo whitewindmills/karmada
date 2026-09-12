@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/helper"
@@ -129,6 +130,20 @@ func (r *HpaScaleTargetMarker) addHPALabelToScaleRef(ctx context.Context, hpa *a
 }
 
 func (r *HpaScaleTargetMarker) deleteHPALabelFromScaleRef(ctx context.Context, hpa *autoscalingv2.HorizontalPodAutoscaler) error {
+	owners := &autoscalingv2.HorizontalPodAutoscalerList{}
+	if err := r.hpaReader.List(ctx, owners, client.InNamespace(hpa.Namespace), client.MatchingFields{
+		hpaScaleTargetIndex: hpaScaleTargetKey(hpa.Spec.ScaleTargetRef),
+	}); err != nil {
+		return fmt.Errorf("failed to find HPAs targeting (%s/%v): %w", hpa.Namespace, hpa.Spec.ScaleTargetRef, err)
+	}
+	for i := range owners.Items {
+		if hasBeenPropagated(&owners.Items[i]) {
+			klog.V(4).InfoS("scale target still has a propagated HPA, skip removing retention",
+				"namespace", hpa.Namespace, "scaleTargetRef", hpa.Spec.ScaleTargetRef, "hpa", owners.Items[i].Name)
+			return nil
+		}
+	}
+
 	targetGVK := schema.FromAPIVersionAndKind(hpa.Spec.ScaleTargetRef.APIVersion, hpa.Spec.ScaleTargetRef.Kind)
 	mapping, err := r.RESTMapper.RESTMapping(targetGVK.GroupKind(), targetGVK.Version)
 	if err != nil {

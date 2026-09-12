@@ -18,9 +18,11 @@ package hpascaletargetmarker
 
 import (
 	"context"
+	"fmt"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -37,6 +39,8 @@ const (
 	ControllerName = "hpa-scale-target-marker"
 	// scaleTargetWorkerNum is the async Worker number
 	scaleTargetWorkerNum = 1
+
+	hpaScaleTargetIndex = "hpaScaleTarget"
 )
 
 // HpaScaleTargetMarker is to automatically add `retain-replicas` label to resource template managed by HPA.
@@ -51,6 +55,9 @@ type HpaScaleTargetMarker struct {
 
 // SetupWithManager creates a controller and register to controller manager.
 func (r *HpaScaleTargetMarker) SetupWithManager(mgr controllerruntime.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &autoscalingv2.HorizontalPodAutoscaler{}, hpaScaleTargetIndex, indexHPAScaleTarget); err != nil {
+		return fmt.Errorf("failed to index HPA scale targets: %w", err)
+	}
 	r.hpaReader = mgr.GetClient()
 	scaleTargetWorkerOptions := util.Options{
 		Name:             "scale target worker",
@@ -67,6 +74,16 @@ func (r *HpaScaleTargetMarker) SetupWithManager(mgr controllerruntime.Manager) e
 			RateLimiter: ratelimiterflag.DefaultControllerRateLimiter[controllerruntime.Request](r.RateLimiterOptions),
 		}).
 		Complete(r)
+}
+
+func indexHPAScaleTarget(obj client.Object) []string {
+	return []string{hpaScaleTargetKey(obj.(*autoscalingv2.HorizontalPodAutoscaler).Spec.ScaleTargetRef)}
+}
+
+func hpaScaleTargetKey(ref autoscalingv2.CrossVersionObjectReference) string {
+	// A served API version does not change a scale target's identity.
+	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
+	return gvk.Group + "/" + gvk.Kind + "/" + ref.Name
 }
 
 // Reconcile performs a full reconciliation for the object referred to by the Request.

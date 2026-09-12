@@ -65,7 +65,8 @@ func newTestMarker(t *testing.T, currentHPA *autoscalingv2.HorizontalPodAutoscal
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, autoscalingv2.AddToScheme(scheme))
-	builder := fake.NewClientBuilder().WithScheme(scheme)
+	builder := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&autoscalingv2.HorizontalPodAutoscaler{}, hpaScaleTargetIndex, indexHPAScaleTarget)
 	if currentHPA != nil {
 		builder.WithObjects(currentHPA)
 	}
@@ -169,4 +170,88 @@ func TestAddHPALabelRetriesCurrentHPAReadErrors(t *testing.T) {
 
 	require.ErrorIs(t, marker.reconcileScaleRef(labelEvent{kind: addLabelEvent, hpa: hpa}), readErr)
 	require.Empty(t, workloadClient.Actions(), "a failed HPA lookup must not mutate its scale target")
+}
+
+func retainTestTarget(t *testing.T, workloadClient *fakedynamic.FakeDynamicClient) {
+	t.Helper()
+	resource := workloadClient.Resource(deploymentGVR).Namespace("default")
+	target, err := resource.Get(t.Context(), "target", metav1.GetOptions{})
+	require.NoError(t, err)
+	util.MergeLabel(target, util.RetainReplicasLabel, util.RetainReplicasValue)
+	_, err = resource.Update(t.Context(), target, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	workloadClient.ClearActions()
+}
+
+func TestDeleteHPALabelPreservesCurrentOwners(t *testing.T) {
+	tests := []struct {
+		name       string
+		noOwner    bool
+		mutate     func(*autoscalingv2.HorizontalPodAutoscaler)
+		wantRetain bool
+	}{
+		{name: "another propagated HPA", wantRetain: true},
+		{
+			name: "same-name HPA replacement",
+			mutate: func(hpa *autoscalingv2.HorizontalPodAutoscaler) {
+				hpa.Name = "scaler"
+			},
+			wantRetain: true,
+		},
+		{
+			name: "same HPA targets the workload again",
+			mutate: func(hpa *autoscalingv2.HorizontalPodAutoscaler) {
+				hpa.Name, hpa.UID = "scaler", "original-hpa"
+			},
+			wantRetain: true,
+		},
+		{name: "last HPA gone", noOwner: true},
+		{name: "remaining HPA not propagated", mutate: func(hpa *autoscalingv2.HorizontalPodAutoscaler) { hpa.Labels = nil }},
+		{name: "other namespace", mutate: func(hpa *autoscalingv2.HorizontalPodAutoscaler) { hpa.Namespace = "other" }},
+		{name: "other workload", mutate: func(hpa *autoscalingv2.HorizontalPodAutoscaler) { hpa.Spec.ScaleTargetRef.Name = "other-target" }},
+		{name: "other API group", mutate: func(hpa *autoscalingv2.HorizontalPodAutoscaler) {
+			hpa.Spec.ScaleTargetRef.APIVersion = "other.example.com/v1"
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deleted := propagatedHPA()
+			remaining := deleted.DeepCopy()
+			remaining.Name, remaining.UID = "remaining", "remaining-hpa"
+			if tt.noOwner {
+				remaining = nil
+			} else if tt.mutate != nil {
+				tt.mutate(remaining)
+			}
+			marker, _, workloadClient := newTestMarker(t, remaining)
+			retainTestTarget(t, workloadClient)
+			require.NoError(t, marker.reconcileScaleRef(labelEvent{kind: deleteLabelEvent, hpa: deleted}))
+			if tt.wantRetain {
+				require.Empty(t, workloadClient.Actions(), "an active owner must prevent scale-target mutation")
+			}
+
+			target, err := workloadClient.Resource(deploymentGVR).Namespace("default").Get(t.Context(), "target", metav1.GetOptions{})
+			require.NoError(t, err)
+			if tt.wantRetain {
+				require.Equal(t, util.RetainReplicasValue, target.GetLabels()[util.RetainReplicasLabel])
+			} else {
+				require.NotContains(t, target.GetLabels(), util.RetainReplicasLabel)
+			}
+			require.Equal(t, "preserved", target.GetLabels()["user"])
+		})
+	}
+}
+
+func TestDeleteHPALabelRetriesOwnerReadErrors(t *testing.T) {
+	marker, hpaClient, workloadClient := newTestMarker(t, nil)
+	retainTestTarget(t, workloadClient)
+	readErr := errors.New("current HPA owners read failed")
+	marker.hpaReader = interceptor.NewClient(hpaClient, interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return readErr
+		},
+	})
+
+	require.ErrorIs(t, marker.reconcileScaleRef(labelEvent{kind: deleteLabelEvent, hpa: propagatedHPA()}), readErr)
+	require.Empty(t, workloadClient.Actions(), "an owner lookup failure must not remove replica retention")
 }
