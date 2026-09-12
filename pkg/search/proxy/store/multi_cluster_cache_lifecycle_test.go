@@ -22,8 +22,11 @@ import (
 	"fmt"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
@@ -33,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/storage"
+	"k8s.io/client-go/dynamic"
 )
 
 type resourceVersionStorage struct {
@@ -175,6 +179,92 @@ func TestMultiClusterCache_WatchSetupFailureStopsStartedSources(t *testing.T) {
 				assert.True(t, source.IsStopped(), "a failed watch setup must release every previously started member watch")
 			}
 			assert.Empty(t, cache.activeWatchers)
+		})
+	}
+}
+
+type failingKindRESTMapper struct {
+	meta.RESTMapper
+	calls  int
+	failAt int
+	err    error
+}
+
+func (m *failingKindRESTMapper) KindFor(resource schema.GroupVersionResource) (schema.GroupVersionKind, error) {
+	m.calls++
+	if m.failAt > 0 && m.calls == m.failAt {
+		return schema.GroupVersionKind{}, m.err
+	}
+	return m.RESTMapper.KindFor(resource)
+}
+
+func TestMultiClusterCache_ResourceExpansionInvalidatesWatches(t *testing.T) {
+	tests := []struct {
+		name      string
+		additions []schema.GroupVersionResource
+		failAt    int
+	}{
+		{name: "unchanged resource caches keep watches open"},
+		{name: "new resource in an existing cluster", additions: []schema.GroupVersionResource{podGVR}},
+		{
+			name:      "a later discovery failure does not hide a successful addition",
+			additions: []schema.GroupVersionResource{podGVR, secretGVR},
+			failAt:    2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			discoveryErr := errors.New("resource discovery failed")
+			mapper := &failingKindRESTMapper{RESTMapper: restMapper, err: discoveryErr}
+			client := NewEnhancedFakeDynamicClientWithResourceVersion(scheme, "100")
+			cache := NewMultiClusterCache(func(string) (dynamic.Interface, error) { return client, nil }, mapper)
+			t.Cleanup(cache.Stop)
+			resources := map[string]map[schema.GroupVersionResource]*MultiNamespace{
+				"cluster1": resourceSet(podGVR, secretGVR),
+				"cluster2": resourceSet(nodeGVR),
+			}
+			registered := map[schema.GroupVersionResource]struct{}{podGVR: {}, nodeGVR: {}, secretGVR: {}}
+			require.NoError(t, cache.UpdateCache(resources, registered))
+
+			var watchers []*watchMuxWithInvalidation
+			for _, gvr := range []schema.GroupVersionResource{podGVR, secretGVR} {
+				mux := newWatchMuxWithInvalidation()
+				mux.AddSource(watch.NewRaceFreeFake(), nil)
+				mux.Start()
+				cache.registerWatch(gvr, mux)
+				t.Cleanup(mux.Stop)
+				watchers = append(watchers, mux)
+			}
+
+			mapper.calls, mapper.failAt = 0, tt.failAt
+			for _, gvr := range tt.additions {
+				resources["cluster2"][gvr] = &MultiNamespace{allNamespaces: true}
+			}
+			err := cache.UpdateCache(resources, registered)
+			if tt.failAt > 0 {
+				require.ErrorIs(t, err, discoveryErr)
+				require.Len(t, cache.cache["cluster2"].cache, 2, "the first new cache must exist before the second discovery fails")
+			} else {
+				require.NoError(t, err)
+			}
+
+			if len(tt.additions) == 0 {
+				for _, mux := range watchers {
+					select {
+					case <-mux.StoppedCh():
+						t.Fatal("an unchanged cache must not invalidate an existing watch")
+					case <-time.After(50 * time.Millisecond):
+					}
+				}
+				return
+			}
+			for _, mux := range watchers {
+				select {
+				case <-mux.StoppedCh():
+				case <-time.After(5 * time.Second):
+					t.Fatal("a newly added resource cache was not made visible to existing watches")
+				}
+			}
 		})
 	}
 }

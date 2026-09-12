@@ -112,6 +112,16 @@ func (c *MultiClusterCache) UpdateCache(resourcesByCluster map[string]map[schema
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	cachesAdded := false
+	defer func() {
+		// Removal stops source watchers, but additions require reconnecting to
+		// discover new sources, even when a later cache update fails.
+		if cachesAdded {
+			klog.Infof("Resource cache topology expanded, invalidating all active watches to trigger reconnection")
+			c.invalidateAllWatches()
+		}
+	}()
+
 	// remove non-exist clusters
 	for clusterName := range c.cache {
 		if _, exist := resourcesByCluster[clusterName]; !exist {
@@ -122,35 +132,22 @@ func (c *MultiClusterCache) UpdateCache(resourcesByCluster map[string]map[schema
 	}
 
 	// add/update cluster cache
-	clustersAdded := false
 	for clusterName, resources := range resourcesByCluster {
 		cache, exist := c.cache[clusterName]
 		if !exist {
 			klog.Infof("Add cache for cluster %v", clusterName)
 			cache = newClusterCache(clusterName, c.clientForClusterFunc(clusterName), c.restMapper)
 			c.cache[clusterName] = cache
-			clustersAdded = true
+			cachesAdded = true
 		}
-		err := cache.updateCache(resources)
+		added, err := cache.updateCache(resources)
+		cachesAdded = cachesAdded || added
 		if err != nil {
 			return err
 		}
 	}
 	c.registeredResources = registeredResources
 
-	// Only invalidate watches when clusters are added (not removed)
-	// Cluster removal is already handled by cacher.Stop() -> terminateAllWatchers()
-	if clustersAdded {
-		// When a new cluster joins or a failed cluster recovers, the watch connection cannot perceive the change.
-		// As a result, resources in the cluster cannot be watched, leading to data inconsistency.
-		// Therefore, we actively disconnect to wait the client to initiate a new connection.
-		// Here not altering the watch behavior but simply terminating the connection early.
-		// The client will automatically re-establish the watch request, thereby obtaining the
-		// complete cluster resource information, including the new or recovered cluster.
-		// For details, please refer to the issue: https://github.com/karmada-io/karmada/issues/6963
-		klog.Infof("Cluster topology changed, invalidating all active watches to trigger reconnection")
-		c.invalidateAllWatches()
-	}
 	return nil
 }
 

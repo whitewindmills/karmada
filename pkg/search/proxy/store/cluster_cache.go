@@ -46,9 +46,11 @@ func newClusterCache(clusterName string, newClientFunc func() (dynamic.Interface
 	}
 }
 
-func (c *clusterCache) updateCache(resources map[schema.GroupVersionResource]*MultiNamespace) error {
+func (c *clusterCache) updateCache(resources map[schema.GroupVersionResource]*MultiNamespace) (bool, error) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
+
+	cachesAdded := false
 
 	// remove non-exist resources
 	for resource, cache := range c.cache {
@@ -65,11 +67,11 @@ func (c *clusterCache) updateCache(resources map[schema.GroupVersionResource]*Mu
 		if !exist {
 			kind, err := c.restMapper.KindFor(resource)
 			if err != nil {
-				return err
+				return cachesAdded, err
 			}
 			mapping, err := c.restMapper.RESTMapping(kind.GroupKind(), kind.Version)
 			if err != nil {
-				return err
+				return cachesAdded, err
 			}
 			namespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
 
@@ -81,18 +83,19 @@ func (c *clusterCache) updateCache(resources map[schema.GroupVersionResource]*Mu
 			singularName, err := c.restMapper.ResourceSingularizer(resource.Resource)
 			if err != nil {
 				klog.Warningf("Failed to get singular name for resource: %s", resource.String())
-				return err
+				return cachesAdded, err
 			}
 
 			klog.Infof("Add cache for %s %s", c.clusterName, resource.String())
 			cache, err := newResourceCache(c.clusterName, resource, kind, singularName, namespaced, multiNS, c.clientForResourceFunc(resource))
 			if err != nil {
-				return err
+				return cachesAdded, err
 			}
 			c.cache[resource] = cache
+			cachesAdded = true
 		}
 	}
-	return nil
+	return cachesAdded, nil
 }
 
 func (c *clusterCache) stop() {
