@@ -235,6 +235,24 @@ func Test_newMultiClusterResourceVersionFromString(t *testing.T) {
 			},
 		},
 		{
+			name: "success - null version map",
+			args: args{
+				s: base64.RawURLEncoding.EncodeToString([]byte("null")),
+			},
+			want: &multiClusterResourceVersion{
+				rvs: map[string]string{},
+			},
+		},
+		{
+			name: "success - whitespace around null version map",
+			args: args{
+				s: base64.RawURLEncoding.EncodeToString([]byte(" \nnull\t ")),
+			},
+			want: &multiClusterResourceVersion{
+				rvs: map[string]string{},
+			},
+		},
+		{
 			name: "success - normal",
 			args: args{
 				s: base64.RawURLEncoding.EncodeToString([]byte(`{"cluster1":"1","cluster2":"2"}`)),

@@ -18,6 +18,7 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"testing"
@@ -360,4 +361,28 @@ func TestMultiClusterCache_TopologyChangeDuringWatchSetup(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMultiClusterCache_WatchNullResourceVersion(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &watchSetupStorage{failAfter: -1}
+		cache := NewMultiClusterCache(nil, nil)
+		cache.cache["cluster1"] = clusterCacheWithStorage(s)
+		w, err := cache.Watch(t.Context(), podGVR, &metainternalversion.ListOptions{
+			ResourceVersion: base64.RawURLEncoding.EncodeToString([]byte("null")),
+		})
+		require.NoError(t, err)
+		defer w.Stop()
+		require.Len(t, s.started, 1)
+
+		object := newUnstructuredObject(podGVK, "pod1", withDefaultNamespace(), withResourceVersion("123"))
+		s.started[0].Add(object)
+		event, ok := <-w.ResultChan()
+		require.True(t, ok)
+		require.Equal(t, watch.Added, event.Type)
+		accessor, err := meta.Accessor(event.Object)
+		require.NoError(t, err)
+		require.Equal(t, buildMultiClusterRV("cluster1", "123"), accessor.GetResourceVersion())
+		require.Equal(t, "123", object.GetResourceVersion(), "decorating the response must not mutate the source object")
+	})
 }

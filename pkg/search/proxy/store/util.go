@@ -63,6 +63,10 @@ func newMultiClusterResourceVersionFromString(s string) *multiClusterResourceVer
 	}
 	// if invalid, ignore the version
 	_ = json.Unmarshal(decoded, &m.rvs)
+	// JSON null must leave a writable map for subsequent watch events.
+	if m.rvs == nil {
+		m.rvs = map[string]string{}
+	}
 	return m
 }
 
