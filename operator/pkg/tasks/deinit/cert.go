@@ -35,8 +35,8 @@ func NewCleanupCertTask(karmada *v1alpha1.Karmada) workflow.Task {
 		newCleanupCertSubTask("karmada", util.KarmadaCertSecretName),
 		newCleanupCertSubTask("webhook", util.WebhookCertSecretName),
 	}
-	// Required only if local etcd is configured
-	if karmada.Spec.Components.Etcd.Local != nil {
+	// Required only if local etcd is configured, including the default configuration.
+	if shouldCleanupLocalEtcd(karmada) {
 		cleanupEtcdCertTask := newCleanupCertSubTask("etcd", util.EtcdCertSecretName)
 		workflowTasks = append(workflowTasks, cleanupEtcdCertTask)
 	}

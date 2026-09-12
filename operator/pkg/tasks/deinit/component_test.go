@@ -22,11 +22,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	fakeclientset "k8s.io/client-go/kubernetes/fake"
 
+	"github.com/karmada-io/karmada/operator/pkg/apis/operator/v1alpha1"
 	"github.com/karmada-io/karmada/operator/pkg/constants"
 	"github.com/karmada-io/karmada/operator/pkg/util"
 	"github.com/karmada-io/karmada/operator/pkg/util/apiclient"
@@ -257,6 +259,101 @@ func TestRunRemoveEtcd(t *testing.T) {
 			if err := test.verify(test.runData, test.statefulset, test.service); err != nil {
 				t.Errorf("failed to verify the deletion of statefulsets and services for etcd component, got: %v", err)
 			}
+		})
+	}
+}
+
+func TestDeInitTasksWithDefaultEtcd(t *testing.T) {
+	tests := []struct {
+		name              string
+		components        *v1alpha1.KarmadaComponents
+		unmanaged         bool
+		wantEtcdResources int
+	}{
+		{
+			name: "omitted components",
+		},
+		{
+			name:       "omitted etcd",
+			components: &v1alpha1.KarmadaComponents{},
+		},
+		{
+			name:       "unspecified etcd mode",
+			components: &v1alpha1.KarmadaComponents{Etcd: &v1alpha1.Etcd{}},
+		},
+		{
+			name:       "local etcd",
+			components: &v1alpha1.KarmadaComponents{Etcd: &v1alpha1.Etcd{Local: &v1alpha1.LocalEtcd{}}},
+		},
+		{
+			name: "external etcd",
+			components: &v1alpha1.KarmadaComponents{Etcd: &v1alpha1.Etcd{External: &v1alpha1.ExternalEtcd{
+				Endpoints: []string{"https://external-etcd.invalid:2379"},
+				SecretRef: v1alpha1.LocalSecretReference{Namespace: "test", Name: "external-etcd"},
+			}}},
+			wantEtcdResources: 1,
+		},
+		{
+			name:              "unmanaged default etcd",
+			unmanaged:         true,
+			wantEtcdResources: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const name, namespace = "karmada-demo", "test"
+			karmada := &v1alpha1.Karmada{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec:       v1alpha1.KarmadaSpec{Components: tt.components},
+			}
+			original := karmada.DeepCopy()
+			etcdLabels := constants.KarmadaOperatorLabel
+			if tt.unmanaged {
+				etcdLabels = nil
+			}
+			remoteClient := fakeclientset.NewClientset(
+				&appsv1.StatefulSet{
+					ObjectMeta: metav1.ObjectMeta{Name: util.KarmadaEtcdName(name), Namespace: namespace, Labels: etcdLabels},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{Name: util.KarmadaEtcdName(name), Namespace: namespace, Labels: etcdLabels},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{Name: util.KarmadaEtcdClientName(name), Namespace: namespace, Labels: etcdLabels},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: util.EtcdCertSecretName(name), Namespace: namespace, Labels: etcdLabels},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: util.KarmadaCertSecretName(name), Namespace: namespace, Labels: constants.KarmadaOperatorLabel},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: util.WebhookCertSecretName(name), Namespace: namespace, Labels: constants.KarmadaOperatorLabel},
+				},
+			)
+			job := workflow.NewJob()
+			job.SetDataInitializer(func() (workflow.RunData, error) {
+				return &TestDeInitData{name: name, namespace: namespace, remoteClient: remoteClient}, nil
+			})
+			job.AppendTask(NewRemoveComponentTask(karmada))
+			job.AppendTask(NewCleanupCertTask(karmada))
+			job.AppendTask(NewCleanupKubeconfigTask())
+
+			require.NoError(t, job.Run())
+			require.NoError(t, job.Run(), "cleanup must be idempotent")
+			require.Equal(t, original, karmada, "cleanup must not default or mutate the deleting object")
+
+			statefulSets, err := remoteClient.AppsV1().StatefulSets(namespace).List(t.Context(), metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, statefulSets.Items, tt.wantEtcdResources)
+
+			services, err := remoteClient.CoreV1().Services(namespace).List(t.Context(), metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, services.Items, 2*tt.wantEtcdResources)
+
+			secrets, err := remoteClient.CoreV1().Secrets(namespace).List(t.Context(), metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, secrets.Items, tt.wantEtcdResources)
 		})
 	}
 }

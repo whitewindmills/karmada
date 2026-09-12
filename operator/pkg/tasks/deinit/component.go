@@ -42,8 +42,8 @@ func NewRemoveComponentTask(karmada *v1alpha1.Karmada) workflow.Task {
 		newRemoveComponentWithServiceSubTask(constants.KarmadaAggregatedAPIServerComponent, util.KarmadaAggregatedAPIServerName),
 		newRemoveComponentWithServiceSubTask(constants.KarmadaAPIserverComponent, util.KarmadaAPIServerName),
 	}
-	// Required only if local etcd is configured
-	if karmada.Spec.Components.Etcd.Local != nil {
+	// Required only if local etcd is configured, including the default configuration.
+	if shouldCleanupLocalEtcd(karmada) {
 		removeEtcdTask := workflow.Task{
 			Name: "remove-etcd",
 			Run:  runRemoveEtcd,
@@ -56,6 +56,15 @@ func NewRemoveComponentTask(karmada *v1alpha1.Karmada) workflow.Task {
 		RunSubTasks: true,
 		Tasks:       workflowTasks,
 	}
+}
+
+func shouldCleanupLocalEtcd(karmada *v1alpha1.Karmada) bool {
+	// Deletion bypasses defaulting; omitted settings use local etcd during installation.
+	components := karmada.Spec.Components
+	if components == nil || components.Etcd == nil {
+		return true
+	}
+	return components.Etcd.Local != nil || components.Etcd.External == nil
 }
 
 func runRemoveComponent(r workflow.RunData) error {
