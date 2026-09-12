@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -146,4 +147,76 @@ func TestGetMetricUsageRatioBaseCase(t *testing.T) {
 	}
 
 	tc.runTest(t)
+}
+
+func TestResourceUtilizationWithLargeMetrics(t *testing.T) {
+	for name, tc := range map[string]resourceUtilizationRatioTestCase{
+		"percentage multiplication": {
+			metrics:                    PodMetricsInfo{"pod": {Value: 1 << 60}},
+			requests:                   map[string]int64{"pod": 1 << 61},
+			targetUtilization:          50,
+			expectedUtilizationRatio:   1,
+			expectedCurrentUtilization: 50,
+			expectedRawAverageValue:    1 << 60,
+		},
+		"metric and request totals": {
+			metrics:                    PodMetricsInfo{"first": {Value: math.MaxInt64}, "second": {Value: math.MaxInt64}},
+			requests:                   map[string]int64{"first": math.MaxInt64, "second": math.MaxInt64},
+			targetUtilization:          50,
+			expectedUtilizationRatio:   2,
+			expectedCurrentUtilization: 100,
+			expectedRawAverageValue:    math.MaxInt64,
+		},
+		"request total alone": {
+			metrics:                    PodMetricsInfo{"first": {Value: 1 << 60}, "second": {Value: 1 << 60}},
+			requests:                   map[string]int64{"first": math.MaxInt64, "second": math.MaxInt64},
+			targetUtilization:          50,
+			expectedUtilizationRatio:   .24,
+			expectedCurrentUtilization: 12,
+			expectedRawAverageValue:    1 << 60,
+		},
+		"unrepresentable utilization": {
+			metrics:           PodMetricsInfo{"pod": {Value: math.MaxInt64}},
+			requests:          map[string]int64{"pod": 1},
+			targetUtilization: 50,
+			expectedErr:       fmt.Errorf("int32"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) { tc.runTest(t) })
+	}
+}
+
+func TestMetricUsageAverageDoesNotOverflow(t *testing.T) {
+	for _, value := range []int64{math.MaxInt64, math.MinInt64} {
+		tc := metricUsageRatioTestCase{
+			metrics:              PodMetricsInfo{"first": {Value: value}, "second": {Value: value}},
+			targetUsage:          value,
+			expectedUsageRatio:   1,
+			expectedCurrentUsage: value,
+		}
+		tc.runTest(t)
+	}
+}
+
+func TestAddMetricTotal(t *testing.T) {
+	for _, tt := range []struct {
+		total int64
+		value int64
+		fits  bool
+		want  int64
+	}{
+		{total: math.MaxInt64 - 1, value: 1, fits: true, want: math.MaxInt64},
+		{total: math.MaxInt64, value: 1},
+		{total: math.MinInt64, value: -1},
+		{total: math.MinInt64, value: 1, fits: true, want: math.MinInt64 + 1},
+		{total: math.MinInt64, value: math.MaxInt64, fits: true, want: -1},
+		{total: -10, value: 10, fits: true},
+		{fits: true},
+	} {
+		sum, fits := addMetricTotal(tt.total, tt.value)
+		assert.Equal(t, tt.fits, fits)
+		if fits {
+			assert.Equal(t, tt.want, sum)
+		}
+	}
 }
