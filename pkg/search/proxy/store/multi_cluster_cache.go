@@ -464,46 +464,45 @@ func (c *MultiClusterCache) clientForClusterFunc(cluster string) func() (dynamic
 }
 
 func (c *MultiClusterCache) fillMissingClusterResourceVersion(ctx context.Context, mcv *multiClusterResourceVersion, clusters []string, gvr schema.GroupVersionResource) error {
-	errChan := make(chan error)
-	var lock sync.Mutex
-	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type versionResult struct {
+		cluster string
+		version string
+		err     error
+	}
+	results := make(chan versionResult)
+	pending := 0
 
 	for _, cluster := range clusters {
 		if _, ok := mcv.rvs[cluster]; ok {
 			continue
 		}
 
-		wg.Add(1)
+		pending++
 		go func(cluster string) {
-			defer wg.Done()
 			klog.V(5).Infof("fillMissingClusterResourceVersion gvr=%v cluster=%v", gvr, cluster)
 			rv, err := c.getClusterResourceVersion(ctx, cluster, gvr)
-			if err != nil {
-				errChan <- err
-				return
-			}
-			if rv == "" {
-				return
-			}
-
-			lock.Lock()
-			defer lock.Unlock()
-			mcv.set(cluster, rv)
+			results <- versionResult{cluster: cluster, version: rv, err: err}
 		}(cluster)
 	}
 
-	waitChan := make(chan struct{}, 1)
-	go func() {
-		wg.Wait()
-		waitChan <- struct{}{}
-	}()
-
-	var err error
-	select {
-	case <-waitChan:
-	case err = <-errChan:
+	var firstErr error
+	for range pending {
+		result := <-results
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+				cancel()
+			}
+			continue
+		}
+		if result.version != "" {
+			mcv.set(result.cluster, result.version)
+		}
 	}
-	return err
+	return firstErr
 }
 
 func (c *MultiClusterCache) getClusterResourceVersion(ctx context.Context, cluster string, gvr schema.GroupVersionResource) (string, error) {
