@@ -120,7 +120,7 @@ func TestAddHPALabelIgnoresObsoleteEvents(t *testing.T) {
 				tt.mutate(current)
 			}
 			marker, _, workloadClient := newTestMarker(t, current)
-			require.NoError(t, marker.reconcileScaleRef(labelEvent{kind: addLabelEvent, hpa: queued}))
+			require.NoError(t, marker.reconcileScaleRef(newLabelEvent(addLabelEvent, queued)))
 			target, err := workloadClient.Resource(deploymentGVR).Namespace(queued.Namespace).Get(t.Context(), "target", metav1.GetOptions{})
 			require.NoError(t, err)
 			if tt.wantLabel {
@@ -136,7 +136,7 @@ func TestAddHPALabelIgnoresObsoleteEvents(t *testing.T) {
 func TestFailedAddDoesNotRestoreLabelAfterHPADeletion(t *testing.T) {
 	hpa := propagatedHPA()
 	marker, hpaClient, workloadClient := newTestMarker(t, hpa)
-	addEvent := labelEvent{kind: addLabelEvent, hpa: hpa.DeepCopy()}
+	addEvent := newLabelEvent(addLabelEvent, hpa)
 	require.NoError(t, marker.reconcileScaleRef(addEvent))
 
 	failNextGet := true
@@ -149,7 +149,7 @@ func TestFailedAddDoesNotRestoreLabelAfterHPADeletion(t *testing.T) {
 	})
 	require.Error(t, marker.reconcileScaleRef(addEvent))
 	require.NoError(t, hpaClient.Delete(t.Context(), hpa))
-	require.NoError(t, marker.reconcileScaleRef(labelEvent{kind: deleteLabelEvent, hpa: hpa}))
+	require.NoError(t, marker.reconcileScaleRef(newLabelEvent(deleteLabelEvent, hpa)))
 	require.NoError(t, marker.reconcileScaleRef(addEvent))
 
 	target, err := workloadClient.Resource(deploymentGVR).Namespace(hpa.Namespace).Get(t.Context(), "target", metav1.GetOptions{})
@@ -168,7 +168,7 @@ func TestAddHPALabelRetriesCurrentHPAReadErrors(t *testing.T) {
 		},
 	})
 
-	require.ErrorIs(t, marker.reconcileScaleRef(labelEvent{kind: addLabelEvent, hpa: hpa}), readErr)
+	require.ErrorIs(t, marker.reconcileScaleRef(newLabelEvent(addLabelEvent, hpa)), readErr)
 	require.Empty(t, workloadClient.Actions(), "a failed HPA lookup must not mutate its scale target")
 }
 
@@ -225,7 +225,7 @@ func TestDeleteHPALabelPreservesCurrentOwners(t *testing.T) {
 			}
 			marker, _, workloadClient := newTestMarker(t, remaining)
 			retainTestTarget(t, workloadClient)
-			require.NoError(t, marker.reconcileScaleRef(labelEvent{kind: deleteLabelEvent, hpa: deleted}))
+			require.NoError(t, marker.reconcileScaleRef(newLabelEvent(deleteLabelEvent, deleted)))
 			if tt.wantRetain {
 				require.Empty(t, workloadClient.Actions(), "an active owner must prevent scale-target mutation")
 			}
@@ -252,6 +252,6 @@ func TestDeleteHPALabelRetriesOwnerReadErrors(t *testing.T) {
 		},
 	})
 
-	require.ErrorIs(t, marker.reconcileScaleRef(labelEvent{kind: deleteLabelEvent, hpa: propagatedHPA()}), readErr)
+	require.ErrorIs(t, marker.reconcileScaleRef(newLabelEvent(deleteLabelEvent, propagatedHPA())), readErr)
 	require.Empty(t, workloadClient.Actions(), "an owner lookup failure must not remove replica retention")
 }

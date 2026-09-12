@@ -17,7 +17,11 @@ limitations under the License.
 package hpascaletargetmarker
 
 import (
+	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -99,5 +103,88 @@ func TestUpdatePropagationClaimTransitions(t *testing.T) {
 			require.Equal(t, tt.wantEvents, kinds)
 			require.Equal(t, "preserved", target.GetLabels()["user"])
 		})
+	}
+}
+
+func TestLabelQueueDeduplicatesEquivalentEvents(t *testing.T) {
+	tests := []struct {
+		name    string
+		enqueue func(*HpaScaleTargetMarker)
+		want    int32
+	}{
+		{
+			name: "one hundred status-only updates",
+			enqueue: func(marker *HpaScaleTargetMarker) {
+				oldHPA := propagatedHPA()
+				for i := range 100 {
+					current := oldHPA.DeepCopy()
+					current.ResourceVersion = fmt.Sprint(i + 2)
+					current.Status.DesiredReplicas = int32(i%2 + 1)
+					marker.Update(event.UpdateEvent{ObjectOld: oldHPA, ObjectNew: current})
+					oldHPA = current
+				}
+			},
+			want: 1,
+		},
+		{
+			name: "replacement HPA identity remains distinct",
+			enqueue: func(marker *HpaScaleTargetMarker) {
+				oldHPA := propagatedHPA()
+				current := oldHPA.DeepCopy()
+				current.UID = "replacement-hpa"
+				marker.Create(event.CreateEvent{Object: oldHPA})
+				marker.Create(event.CreateEvent{Object: current})
+			},
+			want: 2,
+		},
+		{
+			name: "addition and retarget cleanup remain distinct",
+			enqueue: func(marker *HpaScaleTargetMarker) {
+				oldHPA := propagatedHPA()
+				current := oldHPA.DeepCopy()
+				current.Spec.ScaleTargetRef.Name = "other-target"
+				marker.Create(event.CreateEvent{Object: oldHPA})
+				marker.Update(event.UpdateEvent{ObjectOld: oldHPA, ObjectNew: current})
+			},
+			want: 3,
+		},
+		{
+			name: "target API version changes remain distinct",
+			enqueue: func(marker *HpaScaleTargetMarker) {
+				oldHPA := propagatedHPA()
+				oldHPA.Spec.ScaleTargetRef.APIVersion = "example.com/v1"
+				oldHPA.Spec.ScaleTargetRef.Kind = "Worker"
+				current := oldHPA.DeepCopy()
+				current.Spec.ScaleTargetRef.APIVersion = "example.com/v2"
+				marker.Create(event.CreateEvent{Object: oldHPA})
+				marker.Update(event.UpdateEvent{ObjectOld: oldHPA, ObjectNew: current})
+			},
+			want: 3,
+		},
+	}
+	for _, priority := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("priority=%t/%s", priority, tt.name), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					var processed atomic.Int32
+					worker := util.NewAsyncWorker(util.Options{
+						UsePriorityQueue: priority,
+						ReconcileFunc: func(util.QueueKey) error {
+							processed.Add(1)
+							return nil
+						},
+					})
+					marker := &HpaScaleTargetMarker{scaleTargetWorker: worker}
+					tt.enqueue(marker)
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					worker.Run(ctx, 1)
+					synctest.Wait()
+					require.Equal(t, tt.want, processed.Load())
+					cancel()
+					synctest.Wait()
+				})
+			})
+		}
 	}
 }

@@ -42,7 +42,7 @@ func (r *HpaScaleTargetMarker) Create(e event.CreateEvent) bool {
 	// if hpa exist and has been propagated, add label to its scale ref resource
 	if hasBeenPropagated(hpa) {
 		priority := util.ItemPriorityIfInInitialList(e.IsInInitialList)
-		r.scaleTargetWorker.AddWithOpts(util.AddOpts{Priority: priority}, labelEvent{addLabelEvent, hpa})
+		r.scaleTargetWorker.AddWithOpts(util.AddOpts{Priority: priority}, newLabelEvent(addLabelEvent, hpa))
 	}
 
 	return false
@@ -69,12 +69,12 @@ func (r *HpaScaleTargetMarker) Update(e event.UpdateEvent) bool {
 	if oldHPA.Spec.ScaleTargetRef.String() != newHPA.Spec.ScaleTargetRef.String() ||
 		(hasBeenPropagated(oldHPA) && !newPropagated) {
 		// if scale ref has label, remove label, otherwise skip
-		r.scaleTargetWorker.Add(labelEvent{deleteLabelEvent, oldHPA})
+		r.scaleTargetWorker.Add(newLabelEvent(deleteLabelEvent, oldHPA))
 	}
 
 	// if new hpa exist and has been propagated, add label to its scale ref resource
 	if newPropagated {
-		r.scaleTargetWorker.Add(labelEvent{addLabelEvent, newHPA})
+		r.scaleTargetWorker.Add(newLabelEvent(addLabelEvent, newHPA))
 	}
 
 	return oldHPA.Status.DesiredReplicas != newHPA.Status.DesiredReplicas
@@ -90,7 +90,7 @@ func (r *HpaScaleTargetMarker) Delete(e event.DeleteEvent) bool {
 	}
 
 	// if scale ref has label, remove label, otherwise skip
-	r.scaleTargetWorker.Add(labelEvent{deleteLabelEvent, hpa})
+	r.scaleTargetWorker.Add(newLabelEvent(deleteLabelEvent, hpa))
 
 	return false
 }
