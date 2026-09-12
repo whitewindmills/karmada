@@ -558,6 +558,10 @@ func calculateFreeResources(rq *corev1.ResourceQuota, resourceNames []corev1.Res
 		} else {
 			available = hardResource.DeepCopy()
 			available.Sub(usedResource)
+			// Lowering a quota can leave existing usage above the new hard limit.
+			if available.Sign() < 0 {
+				available.Set(0)
+			}
 		}
 
 		// Every alias constrains the resource; known capacity must not mask an uninitialized alias.

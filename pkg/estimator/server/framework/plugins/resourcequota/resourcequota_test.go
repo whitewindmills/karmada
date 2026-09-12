@@ -377,6 +377,58 @@ func TestQuotaScopeSelectorRequiresAllExpressions(t *testing.T) {
 	})
 }
 
+func TestQuotaOveruseNeverProducesNegativeOrWrappedCapacity(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		resource corev1.ResourceName
+		hard     string
+		used     string
+		request  string
+		want     int32
+	}{
+		{name: "CPU overuse", resource: corev1.ResourceCPU, hard: "30m", used: "50m", request: "10m"},
+		{name: "memory quotient below int32", resource: corev1.ResourceMemory, hard: "1Gi", used: "4Gi", request: "1"},
+		{name: "extended resource overuse", resource: "example.com/device", hard: "1", used: "2", request: "1"},
+		{name: "exact exhaustion", resource: corev1.ResourceCPU, hard: "30m", used: "30m", request: "10m"},
+		{name: "remaining capacity", resource: corev1.ResourceCPU, hard: "30m", used: "0", request: "10m", want: 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			hard := corev1.ResourceList{tt.resource: resource.MustParse(tt.hard)}
+			quota := &corev1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: "test"},
+				Spec:       corev1.ResourceQuotaSpec{Hard: hard},
+				Status: corev1.ResourceQuotaStatus{
+					Hard: hard, Used: corev1.ResourceList{tt.resource: resource.MustParse(tt.used)},
+				},
+			}
+			original := quota.DeepCopy()
+			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+			require.NoError(t, indexer.Add(quota))
+			plugin := &resourceQuotaEstimator{enabled: true, rqLister: corelisters.NewResourceQuotaLister(indexer)}
+			requests := corev1.ResourceList{tt.resource: resource.MustParse(tt.request)}
+			wantStatus := framework.Unschedulable
+			if tt.want > 0 {
+				wantStatus = framework.Success
+			}
+			replicas, result := plugin.Estimate(t.Context(), framework.ReplicaEstimationContext{
+				ReplicaRequirements: (&pb.ReplicaRequirements{Namespace: quota.Namespace}).MustSetResourceRequest(requests),
+			})
+			assert.Equal(t, tt.want, replicas)
+			assert.Equal(t, wantStatus, result.Code())
+			componentSets, result := plugin.EstimateComponents(t.Context(), framework.ComponentEstimationContext{
+				Namespace: quota.Namespace,
+				Components: []*pb.Component{{
+					Name: "app", Replicas: 1,
+					ReplicaRequirements: (&pb.ComponentReplicaRequirements{}).MustSetResourceRequest(requests),
+				}},
+			})
+			assert.Equal(t, tt.want, componentSets)
+			assert.Equal(t, wantStatus, result.Code())
+			assert.Equal(t, original, quota)
+		})
+	}
+}
+
 func TestResourceQuotaEstimatorPlugin(t *testing.T) {
 	tests := map[string]struct {
 		replicaRequirements *pb.ReplicaRequirements
