@@ -429,6 +429,96 @@ func TestQuotaOveruseNeverProducesNegativeOrWrappedCapacity(t *testing.T) {
 	}
 }
 
+func TestQuotaComponentArithmeticDoesNotOverflow(t *testing.T) {
+	type componentRequest struct {
+		replicas int32
+		amount   string
+	}
+	for _, tt := range []struct {
+		name         string
+		resource     corev1.ResourceName
+		hard         string
+		components   []componentRequest
+		want         int32
+		checkAssumed bool
+	}{
+		{name: "replica multiplication", resource: corev1.ResourceMemory, hard: "1Gi",
+			components: []componentRequest{{replicas: 1 << 30, amount: "8Gi"}}, checkAssumed: true},
+		{name: "component sum", resource: corev1.ResourceMemory, hard: "1Gi",
+			components: []componentRequest{{replicas: 1 << 30, amount: "4Gi"}, {replicas: 1 << 30, amount: "4Gi"}}, checkAssumed: true},
+		{name: "CPU quota exceeds milli int64", resource: corev1.ResourceCPU, hard: "10000000000000000",
+			components: []componentRequest{{replicas: 1, amount: "5000000000000000"}}, want: 2},
+		{name: "CPU aggregated request exceeds milli int64", resource: corev1.ResourceCPU, hard: "10000000000000000",
+			components: []componentRequest{{replicas: 2, amount: "5000000000000000"}}, want: 1},
+		{name: "safe milli conversion boundary", resource: corev1.ResourceCPU, hard: "9223372036854775.807",
+			components: []componentRequest{{replicas: 1, amount: "4611686018427387.904"}}, want: 1},
+		{name: "exact fallback boundary", resource: corev1.ResourceCPU, hard: "9223372036854775.808",
+			components: []componentRequest{{replicas: 1, amount: "4611686018427387.904"}}, want: 2},
+		{name: "large quota remains bounded by int32", resource: corev1.ResourceCPU, hard: "10000000000000000",
+			components: []componentRequest{{replicas: 1, amount: "1"}}, want: math.MaxInt32},
+		{name: "per replica CPU rounding", resource: corev1.ResourceCPU, hard: "10m",
+			components: []componentRequest{{replicas: 3, amount: "0.1m"}}, want: 3},
+		{name: "per replica byte rounding", resource: corev1.ResourceMemory, hard: "10",
+			components: []componentRequest{{replicas: 3, amount: "100m"}}, want: 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			hard := corev1.ResourceList{tt.resource: resource.MustParse(tt.hard)}
+			quota := &corev1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: "test"},
+				Spec:       corev1.ResourceQuotaSpec{Hard: hard},
+				Status: corev1.ResourceQuotaStatus{
+					Hard: hard, Used: corev1.ResourceList{tt.resource: resource.MustParse("0")},
+				},
+			}
+			original := quota.DeepCopy()
+			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+			require.NoError(t, indexer.Add(quota))
+			plugin := &resourceQuotaEstimator{enabled: true, rqLister: corelisters.NewResourceQuotaLister(indexer)}
+			var components []*pb.Component
+			for i, component := range tt.components {
+				components = append(components, &pb.Component{
+					Name: fmt.Sprintf("component%d", i), Replicas: component.replicas,
+					ReplicaRequirements: (&pb.ComponentReplicaRequirements{}).
+						MustSetResourceRequest(corev1.ResourceList{tt.resource: resource.MustParse(component.amount)}),
+				})
+			}
+			componentSets, result := plugin.EstimateComponents(t.Context(), framework.ComponentEstimationContext{
+				Namespace: quota.Namespace, Components: components,
+			})
+			assert.Equal(t, tt.want, componentSets)
+			assert.Equal(t, tt.want == 0, result.Code() == framework.Unschedulable)
+			if len(tt.components) == 1 && tt.components[0].replicas == 1 {
+				replicas, result := plugin.Estimate(t.Context(), framework.ReplicaEstimationContext{
+					ReplicaRequirements: (&pb.ReplicaRequirements{Namespace: quota.Namespace}).
+						MustSetResourceRequest(corev1.ResourceList{tt.resource: resource.MustParse(tt.components[0].amount)}),
+				})
+				assert.Equal(t, tt.want, replicas)
+				assert.Equal(t, framework.Success, result.Code())
+			}
+			if tt.checkAssumed {
+				assumed := []*pb.AssumedWorkload{{Namespace: quota.Namespace, Components: components}}
+				requests := corev1.ResourceList{tt.resource: resource.MustParse("1")}
+				replicas, result := plugin.Estimate(t.Context(), framework.ReplicaEstimationContext{
+					ReplicaRequirements: (&pb.ReplicaRequirements{Namespace: quota.Namespace}).MustSetResourceRequest(requests),
+					AssumedWorkloads:    assumed,
+				})
+				assert.Zero(t, replicas)
+				assert.Equal(t, framework.Unschedulable, result.Code())
+				componentSets, result := plugin.EstimateComponents(t.Context(), framework.ComponentEstimationContext{
+					Namespace: quota.Namespace, AssumedWorkloads: assumed,
+					Components: []*pb.Component{{
+						Name: "incoming", Replicas: 1,
+						ReplicaRequirements: (&pb.ComponentReplicaRequirements{}).MustSetResourceRequest(requests),
+					}},
+				})
+				assert.Zero(t, componentSets)
+				assert.Equal(t, framework.Unschedulable, result.Code())
+			}
+			assert.Equal(t, original, quota, "exact arithmetic must not mutate cached quota quantities")
+		})
+	}
+}
+
 func TestResourceQuotaEstimatorPlugin(t *testing.T) {
 	tests := map[string]struct {
 		replicaRequirements *pb.ReplicaRequirements

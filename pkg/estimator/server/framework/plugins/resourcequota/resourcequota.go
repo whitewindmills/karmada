@@ -34,7 +34,6 @@ import (
 	"github.com/karmada-io/karmada/pkg/estimator/pb"
 	"github.com/karmada-io/karmada/pkg/estimator/server/framework"
 	"github.com/karmada-io/karmada/pkg/features"
-	"github.com/karmada-io/karmada/pkg/util"
 	corev1helper "github.com/karmada-io/karmada/pkg/util/lifted"
 )
 
@@ -341,7 +340,7 @@ func quotaAppliesToPriority(selectors []corev1.ScopedResourceSelectorRequirement
 // aggregateComponentRequirements computes the total resource requirements for one complete
 // component set by summing up each component's per-replica requirements multiplied by its replica count.
 func (pl *resourceQuotaEstimator) aggregateComponentRequirements(components []*pb.Component) (corev1.ResourceList, error) {
-	resourceRequirements := map[corev1.ResourceName]int64{}
+	resourceRequirements := corev1.ResourceList{}
 
 	for _, component := range components {
 		if component == nil || component.ReplicaRequirements == nil {
@@ -360,18 +359,26 @@ func (pl *resourceQuotaEstimator) aggregateComponentRequirements(components []*p
 				continue
 			}
 
-			// CPU uses MilliValue, all others use Value
-			var perReplicaAmount int64
+			quantity := perReplicaQuantity.DeepCopy()
 			if resourceName == corev1.ResourceCPU {
-				perReplicaAmount = perReplicaQuantity.MilliValue()
+				quantity.RoundUp(resource.Milli)
+				quantity.Format = resource.DecimalSI
 			} else {
-				perReplicaAmount = perReplicaQuantity.Value()
+				quantity.RoundUp(0)
+				if resourceName == corev1.ResourceMemory {
+					quantity.Format = resource.BinarySI
+				} else {
+					quantity.Format = resource.DecimalSI
+				}
 			}
-			resourceRequirements[resourceName] += perReplicaAmount * replicas
+			quantity.Mul(replicas)
+			total := resourceRequirements[resourceName]
+			total.Add(quantity)
+			resourceRequirements[resourceName] = total
 		}
 	}
 
-	return convertToResourceList(resourceRequirements), nil
+	return resourceRequirements, nil
 }
 
 // evaluateResourcesAgainstQuota calculates how many complete sets of the required resources
@@ -386,19 +393,50 @@ func (pl *resourceQuotaEstimator) evaluateResourcesAgainstQuota(
 		return noQuotaConstraint
 	}
 
-	// Create a Resource object with available quota
-	availableResource := util.NewResource(availableResources)
-	availableResource.AllowedPodNumber = math.MaxInt64 // Pod quota not supported yet
+	allowed := int64(noQuotaConstraint)
+	for name, quantity := range filtered {
+		if quantity.Sign() <= 0 {
+			continue
+		}
+		scale := resource.Scale(0)
+		if name == corev1.ResourceCPU {
+			scale = resource.Milli
+		}
+		required := quantity.DeepCopy()
+		available := availableResources[name].DeepCopy()
+		required.RoundUp(scale)
+		available.RoundUp(scale)
+		if available.Cmp(required) < 0 {
+			return 0
+		}
 
-	// Calculate how many sets can fit using resource-agnostic division
-	allowed := availableResource.MaxDivided(filtered)
+		// Keep ordinary estimates on integer division, but only after proving conversion is safe.
+		maxUnits := resource.NewScaledQuantity(math.MaxInt64, scale)
+		if available.Cmp(*maxUnits) <= 0 {
+			allowed = min(allowed, available.ScaledValue(scale)/required.ScaledValue(scale))
+			continue
+		}
 
-	// Handle integer overflow: treat very large numbers as no constraint
-	if allowed > math.MaxInt32 {
-		return noQuotaConstraint
+		// The result is bounded by int32 even when the quantities need arbitrary precision.
+		maximum := required.DeepCopy()
+		maximum.Mul(allowed)
+		if maximum.Cmp(available) <= 0 {
+			continue
+		}
+		low, high := int64(0), allowed
+		for low < high {
+			middle := low + (high-low+1)/2
+			cost := required.DeepCopy()
+			cost.Mul(middle)
+			if cost.Cmp(available) <= 0 {
+				low = middle
+			} else {
+				high = middle - 1
+			}
+		}
+		allowed = low
 	}
-
-	return int32(allowed) // #nosec G115: integer overflow conversion int64 -> int32
+	return int32(allowed) // #nosec G115 -- bounded by MaxInt32 and never negative.
 }
 
 // evaluateReplicasAgainstQuota evaluates per-replica resource requirements against a single ResourceQuota.
@@ -450,33 +488,7 @@ func (pl *resourceQuotaEstimator) evaluateReplicasAgainstQuota(
 		}
 	}
 
-	// Filter to only include resources that are constrained by this ResourceQuota.
-	filteredRequirements := filterConstrainedResources(availableResources, requirements)
-
-	// If no resources are constrained by this quota, skip it.
-	if len(filteredRequirements) == 0 {
-		return noQuotaConstraint, nil
-	}
-
-	// Create a Resource object with available quota.
-	availableResource := util.NewResource(availableResources)
-
-	// Pod quota is not supported in the current implementation.
-	// To add pod quota support in the future:
-	// 1. Include pod count in aggregateComponentRequirements()
-	// 2. Remove this line to let AllowedPodNumber be calculated from availableResources
-	// 3. Add test cases for pod quota constraints
-	availableResource.AllowedPodNumber = math.MaxInt64
-
-	// Calculate how many replicas can fit within the quota.
-	allowed := availableResource.MaxDivided(filteredRequirements)
-
-	// Handle integer overflow: treat very large numbers as no constraint for this quota.
-	if allowed > math.MaxInt32 {
-		return noQuotaConstraint, nil
-	}
-
-	return int32(allowed), nil // #nosec G115: integer overflow conversion int64 -> int32
+	return pl.evaluateResourcesAgainstQuota(availableResources, requirements), nil
 }
 
 // filterConstrainedResources returns only the resources from requirements that are actually
@@ -512,26 +524,6 @@ func isSupportedResource(resourceName corev1.ResourceName) bool {
 	}
 
 	return false
-}
-
-// convertToResourceList converts a map of int64 values to a ResourceList with appropriate formats.
-// Only handles supported compute resources: CPU (milli-units), Memory (bytes), and Extended Resources (GPU, etc.).
-func convertToResourceList(resourceRequirements map[corev1.ResourceName]int64) corev1.ResourceList {
-	result := corev1.ResourceList{}
-	for resourceName, totalAmount := range resourceRequirements {
-		switch resourceName {
-		case corev1.ResourceCPU:
-			// CPU is stored in millicores, use NewMilliQuantity
-			result[resourceName] = *resource.NewMilliQuantity(totalAmount, resource.DecimalSI)
-		case corev1.ResourceMemory:
-			// Memory uses binary units (Ki, Mi, Gi)
-			result[resourceName] = *resource.NewQuantity(totalAmount, resource.BinarySI)
-		default:
-			// All other supported resources are extended resources (GPU, etc.) using decimal format
-			result[resourceName] = *resource.NewQuantity(totalAmount, resource.DecimalSI)
-		}
-	}
-	return result
 }
 
 // calculateFreeResources calculates the free resources from the input ResourceQuota.
