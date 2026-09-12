@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
 	"github.com/karmada-io/karmada/pkg/features"
@@ -43,12 +44,14 @@ type HpaScaleTargetMarker struct {
 	DynamicClient dynamic.Interface
 	RESTMapper    meta.RESTMapper
 
+	hpaReader          client.Reader
 	scaleTargetWorker  util.AsyncPriorityWorker
 	RateLimiterOptions ratelimiterflag.Options
 }
 
 // SetupWithManager creates a controller and register to controller manager.
 func (r *HpaScaleTargetMarker) SetupWithManager(mgr controllerruntime.Manager) error {
+	r.hpaReader = mgr.GetClient()
 	scaleTargetWorkerOptions := util.Options{
 		Name:             "scale target worker",
 		ReconcileFunc:    r.reconcileScaleRef,

@@ -72,6 +72,21 @@ func (r *HpaScaleTargetMarker) reconcileScaleRef(key util.QueueKey) (err error) 
 }
 
 func (r *HpaScaleTargetMarker) addHPALabelToScaleRef(ctx context.Context, hpa *autoscalingv2.HorizontalPodAutoscaler) error {
+	// Retries can outlive the HPA or its original scale target.
+	currentHPA := &autoscalingv2.HorizontalPodAutoscaler{}
+	if err := r.hpaReader.Get(ctx, types.NamespacedName{Namespace: hpa.Namespace, Name: hpa.Name}, currentHPA); err != nil {
+		if apierrors.IsNotFound(err) {
+			klog.V(4).InfoS("HPA no longer exists, skip label event", "namespace", hpa.Namespace, "name", hpa.Name)
+			return nil
+		}
+		return fmt.Errorf("failed to get current HPA (%s/%s): %w", hpa.Namespace, hpa.Name, err)
+	}
+	if currentHPA.UID != hpa.UID || currentHPA.Spec.ScaleTargetRef != hpa.Spec.ScaleTargetRef ||
+		!currentHPA.DeletionTimestamp.IsZero() || !hasBeenPropagated(currentHPA) {
+		klog.V(4).InfoS("skip obsolete HPA label event", "namespace", hpa.Namespace, "name", hpa.Name)
+		return nil
+	}
+
 	targetGVK := schema.FromAPIVersionAndKind(hpa.Spec.ScaleTargetRef.APIVersion, hpa.Spec.ScaleTargetRef.Kind)
 	mapping, err := r.RESTMapper.RESTMapping(targetGVK.GroupKind(), targetGVK.Version)
 	if err != nil {
