@@ -134,6 +134,12 @@ func (r *DeploymentReplicasSyncer) Reconcile(ctx context.Context, req controller
 		return controllerruntime.Result{}, err
 	}
 
+	// A queued retry may outlive the label that made this Deployment eligible.
+	if util.GetLabelValue(deployment.Labels, util.RetainReplicasLabel) != util.RetainReplicasValue {
+		klog.V(4).InfoS("skip replica synchronization because retain-replicas is disabled", "namespace", req.Namespace, "name", req.Name)
+		return controllerruntime.Result{}, nil
+	}
+
 	// 4. if replicas in spec already the same as in status, no need to update replicas
 	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == deployment.Status.Replicas {
 		klog.InfoS("replicas in spec field are already equal to those in status field",

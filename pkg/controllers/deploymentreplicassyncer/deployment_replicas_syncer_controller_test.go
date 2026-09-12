@@ -18,9 +18,11 @@ package deploymentreplicassyncer
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -337,6 +339,98 @@ func TestReconcile(t *testing.T) {
 				assert.Equal(t, *tc.expectedReplicas, *updatedDeployment.Spec.Replicas)
 			}
 		})
+	}
+}
+
+func TestReconcileRechecksRetentionAfterRetry(t *testing.T) {
+	tests := []struct {
+		name  string
+		label string
+	}{
+		{name: "removed marker"},
+		{name: "disabled marker", label: "false"},
+		{name: "retention still enabled", label: util.RetainReplicasValue},
+	}
+	for _, tt := range tests {
+		for _, statusCollected := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/status-collected=%t", tt.name, statusCollected), func(t *testing.T) {
+				scheme := runtime.NewScheme()
+				require.NoError(t, appsv1.AddToScheme(scheme))
+				require.NoError(t, workv1alpha2.Install(scheme))
+				deployment := &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "queued-deployment",
+						Namespace: "default",
+						Labels:    map[string]string{util.RetainReplicasLabel: util.RetainReplicasValue},
+					},
+					Spec:   appsv1.DeploymentSpec{Replicas: ptr.To[int32](3)},
+					Status: appsv1.DeploymentStatus{Replicas: 4},
+				}
+				binding := &workv1alpha2.ResourceBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       names.GenerateBindingName(util.DeploymentKind, deployment.Name),
+						Namespace:  deployment.Namespace,
+						Generation: 1,
+					},
+					Spec: workv1alpha2.ResourceBindingSpec{
+						Replicas: 3,
+						Placement: &policyv1alpha1.Placement{
+							ReplicaScheduling: &policyv1alpha1.ReplicaSchedulingStrategy{
+								ReplicaSchedulingType: policyv1alpha1.ReplicaSchedulingTypeDivided,
+							},
+						},
+						Clusters: []workv1alpha2.TargetCluster{{Name: "cluster1", Replicas: 3}},
+					},
+					Status: workv1alpha2.ResourceBindingStatus{
+						AggregatedStatus: []workv1alpha2.AggregatedStatusItem{{
+							ClusterName: "cluster1",
+							Status:      &runtime.RawExtension{Raw: []byte(`{"replicas":4}`)},
+						}},
+					},
+				}
+				client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment, binding).
+					WithStatusSubresource(deployment, binding).Build()
+				r := &DeploymentReplicasSyncer{Client: client}
+				request := reconcile.Request{NamespacedName: types.NamespacedName{
+					Namespace: deployment.Namespace, Name: deployment.Name,
+				}}
+
+				result, err := r.Reconcile(t.Context(), request)
+				require.NoError(t, err)
+				require.Equal(t, reconcile.Result{RequeueAfter: waitDeploymentStatusInterval}, result)
+
+				require.NoError(t, client.Get(t.Context(), request.NamespacedName, deployment))
+				if tt.label == "" {
+					delete(deployment.Labels, util.RetainReplicasLabel)
+				} else {
+					deployment.Labels[util.RetainReplicasLabel] = tt.label
+				}
+				require.NoError(t, client.Update(t.Context(), deployment))
+				if statusCollected {
+					require.NoError(t, client.Get(t.Context(), types.NamespacedName{
+						Namespace: binding.Namespace, Name: binding.Name,
+					}, binding))
+					binding.Status.SchedulerObservedGeneration = binding.Generation
+					require.NoError(t, client.Status().Update(t.Context(), binding))
+				}
+
+				result, err = r.Reconcile(t.Context(), request)
+				require.NoError(t, err)
+				wantReplicas := int32(3)
+				wantResult := reconcile.Result{}
+				if tt.label == util.RetainReplicasValue {
+					if statusCollected {
+						wantReplicas = 4
+					} else {
+						wantResult.RequeueAfter = waitDeploymentStatusInterval
+					}
+				}
+				assert.Equal(t, wantResult, result)
+				require.NoError(t, client.Get(t.Context(), request.NamespacedName, deployment))
+				require.NotNil(t, deployment.Spec.Replicas)
+				assert.Equal(t, wantReplicas, *deployment.Spec.Replicas)
+			})
+		}
 	}
 }
 
