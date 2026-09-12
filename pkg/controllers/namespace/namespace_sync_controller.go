@@ -179,6 +179,54 @@ func (c *Controller) buildWorks(ctx context.Context, namespace *corev1.Namespace
 	return utilerrors.NewAggregate(errs)
 }
 
+func (c *Controller) clusterOverridePolicyNamespaceRequests(_ context.Context, obj client.Object) []reconcile.Request {
+	var requests []reconcile.Request
+	cop, ok := obj.(*policyv1alpha1.ClusterOverridePolicy)
+	if !ok {
+		return requests
+	}
+
+	selectedNamespaces := sets.NewString()
+	// An empty selector list matches all resources, including namespaces.
+	containsAllNamespace := len(cop.Spec.ResourceSelectors) == 0
+	for _, rs := range cop.Spec.ResourceSelectors {
+		if rs.APIVersion != "v1" || rs.Kind != "Namespace" {
+			continue
+		}
+
+		if rs.Name == "" {
+			containsAllNamespace = true
+			break
+		}
+
+		selectedNamespaces.Insert(rs.Name)
+	}
+
+	if containsAllNamespace {
+		namespaceList := &corev1.NamespaceList{}
+		if err := c.Client.List(context.TODO(), namespaceList); err != nil {
+			klog.ErrorS(err, "Failed to list namespace")
+			return nil
+		}
+
+		for _, namespace := range namespaceList.Items {
+			requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+				Name: namespace.Name,
+			}})
+		}
+
+		return requests
+	}
+
+	for _, ns := range selectedNamespaces.UnsortedList() {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: ns,
+		}})
+	}
+
+	return requests
+}
+
 // SetupWithManager creates a controller and register to controller manager.
 func (c *Controller) SetupWithManager(mgr controllerruntime.Manager) error {
 	clusterNamespaceFn := handler.MapFunc(
@@ -213,54 +261,6 @@ func (c *Controller) SetupWithManager(mgr controllerruntime.Manager) error {
 		},
 	})
 
-	clusterOverridePolicyNamespaceFn := handler.MapFunc(
-		func(_ context.Context, obj client.Object) []reconcile.Request {
-			var requests []reconcile.Request
-			cop, ok := obj.(*policyv1alpha1.ClusterOverridePolicy)
-			if !ok {
-				return requests
-			}
-
-			selectedNamespaces := sets.NewString()
-			containsAllNamespace := false
-			for _, rs := range cop.Spec.ResourceSelectors {
-				if rs.APIVersion != "v1" || rs.Kind != "Namespace" {
-					continue
-				}
-
-				if rs.Name == "" {
-					containsAllNamespace = true
-					break
-				}
-
-				selectedNamespaces.Insert(rs.Name)
-			}
-
-			if containsAllNamespace {
-				namespaceList := &corev1.NamespaceList{}
-				if err := c.Client.List(context.TODO(), namespaceList); err != nil {
-					klog.ErrorS(err, "Failed to list namespace")
-					return nil
-				}
-
-				for _, namespace := range namespaceList.Items {
-					requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
-						Name: namespace.Name,
-					}})
-				}
-
-				return requests
-			}
-
-			for _, ns := range selectedNamespaces.UnsortedList() {
-				requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
-					Name: ns,
-				}})
-			}
-
-			return requests
-		})
-
 	clusterOverridePolicyPredicate := builder.WithPredicates(predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool {
 			return true
@@ -283,7 +283,7 @@ func (c *Controller) SetupWithManager(mgr controllerruntime.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(clusterNamespaceFn),
 			clusterPredicate).
 		Watches(&policyv1alpha1.ClusterOverridePolicy{},
-			handler.EnqueueRequestsFromMapFunc(clusterOverridePolicyNamespaceFn),
+			handler.EnqueueRequestsFromMapFunc(c.clusterOverridePolicyNamespaceRequests),
 			clusterOverridePolicyPredicate).
 		WithOptions(controller.Options{
 			RateLimiter: ratelimiterflag.DefaultControllerRateLimiter[controllerruntime.Request](c.RateLimiterOptions),

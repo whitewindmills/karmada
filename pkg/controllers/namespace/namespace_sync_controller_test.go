@@ -20,10 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -453,6 +455,120 @@ func TestController_SetupWithManager(t *testing.T) {
 				assert.NotNil(t, c.EventRecorder, "Controller's EventRecorder should not be nil")
 				assert.NotNil(t, c.OverrideManager, "Controller's OverrideManager should not be nil")
 			}
+		})
+	}
+}
+
+func TestController_ClusterOverridePolicyNamespaceLifecycle(t *testing.T) {
+	namespaceNames := []string{"namespace-a", "namespace-b"}
+	tests := []struct {
+		name               string
+		selectors          []policyv1alpha1.ResourceSelector
+		expectedNamespaces []string
+	}{
+		{
+			name:               "omitted selectors match all namespaces",
+			expectedNamespaces: namespaceNames,
+		},
+		{
+			name:               "empty selectors match all namespaces",
+			selectors:          []policyv1alpha1.ResourceSelector{},
+			expectedNamespaces: namespaceNames,
+		},
+		{
+			name:               "explicit namespace kind matches all namespaces",
+			selectors:          []policyv1alpha1.ResourceSelector{{APIVersion: "v1", Kind: "Namespace"}},
+			expectedNamespaces: namespaceNames,
+		},
+		{
+			name:               "named namespace selector remains restricted",
+			selectors:          []policyv1alpha1.ResourceSelector{{APIVersion: "v1", Kind: "Namespace", Name: "namespace-a"}},
+			expectedNamespaces: []string{"namespace-a"},
+		},
+		{
+			name:      "other resource kinds do not enqueue namespaces",
+			selectors: []policyv1alpha1.ResourceSelector{{APIVersion: "apps/v1", Kind: "Deployment"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, clusterv1alpha1.Install(scheme))
+			require.NoError(t, policyv1alpha1.Install(scheme))
+			require.NoError(t, workv1alpha1.Install(scheme))
+
+			cluster := &clusterv1alpha1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "cluster1"}}
+			objects := []client.Object{cluster}
+			for _, name := range namespaceNames {
+				objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+					Name:   name,
+					UID:    types.UID(name),
+					Labels: map[string]string{"overridden": "original"},
+				}})
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+				WithInterceptorFuncs(withGVKInterceptor(scheme)).Build()
+			c := &Controller{
+				Client:          fakeClient,
+				OverrideManager: overridemanager.New(fakeClient, record.NewFakeRecorder(100)),
+			}
+			for _, name := range namespaceNames {
+				_, err := c.Reconcile(t.Context(), controllerruntime.Request{NamespacedName: types.NamespacedName{Name: name}})
+				require.NoError(t, err)
+			}
+
+			cop := &policyv1alpha1.ClusterOverridePolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "namespace-label"},
+				Spec: policyv1alpha1.OverrideSpec{
+					ResourceSelectors: tt.selectors,
+					OverrideRules: []policyv1alpha1.RuleWithCluster{{
+						Overriders: policyv1alpha1.Overriders{
+							Plaintext: []policyv1alpha1.PlaintextOverrider{{
+								Path:     "/metadata/labels/overridden",
+								Operator: policyv1alpha1.OverriderOpAdd,
+								Value:    apiextensionsv1.JSON{Raw: []byte(`"first"`)},
+							}},
+						},
+					}},
+				},
+			}
+			syncPolicyEvent := func(wantLabel string) {
+				t.Helper()
+				requests := c.clusterOverridePolicyNamespaceRequests(t.Context(), cop)
+				var requestedNames []string
+				for _, request := range requests {
+					requestedNames = append(requestedNames, request.Name)
+					_, err := c.Reconcile(t.Context(), request)
+					require.NoError(t, err)
+				}
+				for _, name := range namespaceNames {
+					work := &workv1alpha1.Work{}
+					require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{
+						Namespace: names.GenerateExecutionSpaceName(cluster.Name),
+						Name:      names.GenerateWorkName("Namespace", name, ""),
+					}, work))
+					require.Len(t, work.Spec.Workload.Manifests, 1)
+					manifest := &corev1.Namespace{}
+					require.NoError(t, json.Unmarshal(work.Spec.Workload.Manifests[0].Raw, manifest))
+					expectedLabel := "original"
+					if slices.Contains(tt.expectedNamespaces, name) {
+						expectedLabel = wantLabel
+					}
+					require.Equal(t, expectedLabel, manifest.Labels["overridden"], "namespace Work %s must reflect the policy event", name)
+				}
+				require.ElementsMatch(t, tt.expectedNamespaces, requestedNames)
+			}
+
+			require.NoError(t, fakeClient.Create(t.Context(), cop))
+			syncPolicyEvent("first")
+
+			cop.Spec.OverrideRules[0].Overriders.Plaintext[0].Value.Raw = []byte(`"second"`)
+			require.NoError(t, fakeClient.Update(t.Context(), cop))
+			syncPolicyEvent("second")
+
+			require.NoError(t, fakeClient.Delete(t.Context(), cop))
+			syncPolicyEvent("original")
 		})
 	}
 }
