@@ -300,6 +300,83 @@ func TestQuotaInitializationDoesNotMeanUnlimitedCapacity(t *testing.T) {
 	}
 }
 
+func TestQuotaScopeSelectorRequiresAllExpressions(t *testing.T) {
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: "test"},
+		Spec: corev1.ResourceQuotaSpec{
+			Hard: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("30m")},
+			ScopeSelector: &corev1.ScopeSelector{MatchExpressions: []corev1.ScopedResourceSelectorRequirement{
+				{ScopeName: corev1.ResourceQuotaScopePriorityClass, Operator: corev1.ScopeSelectorOpIn, Values: []string{"included", "excluded"}},
+				{ScopeName: corev1.ResourceQuotaScopePriorityClass, Operator: corev1.ScopeSelectorOpNotIn, Values: []string{"excluded"}},
+			}},
+		},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("30m")},
+			Used: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0")},
+		},
+	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, indexer.Add(quota))
+	plugin := &resourceQuotaEstimator{enabled: true, rqLister: corelisters.NewResourceQuotaLister(indexer)}
+	newComponent := func(priority, cpu string) *pb.Component {
+		return &pb.Component{
+			Name: priority + "-component", Replicas: 1,
+			ReplicaRequirements: (&pb.ComponentReplicaRequirements{PriorityClassName: priority}).
+				MustSetResourceRequest(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpu)}),
+		}
+	}
+	for _, tt := range []struct {
+		priority string
+		want     int32
+	}{
+		{priority: "included", want: 3},
+		{priority: "excluded", want: math.MaxInt32},
+		{priority: "unrelated", want: math.MaxInt32},
+	} {
+		t.Run(tt.priority, func(t *testing.T) {
+			replicas, result := plugin.Estimate(t.Context(), framework.ReplicaEstimationContext{
+				ReplicaRequirements: (&pb.ReplicaRequirements{Namespace: quota.Namespace, PriorityClassName: tt.priority}).
+					MustSetResourceRequest(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m")}),
+			})
+			assert.Equal(t, tt.want, replicas)
+			assert.Equal(t, framework.Success, result.Code())
+			componentSets, result := plugin.EstimateComponents(t.Context(), framework.ComponentEstimationContext{
+				Namespace: quota.Namespace, Components: []*pb.Component{newComponent(tt.priority, "10m")},
+			})
+			assert.Equal(t, tt.want, componentSets)
+			assert.Equal(t, framework.Success, result.Code())
+		})
+	}
+	t.Run("partially matching assumptions are ignored", func(t *testing.T) {
+		assumed := []*pb.AssumedWorkload{{
+			Namespace: quota.Namespace, Components: []*pb.Component{newComponent("excluded", "100m")},
+		}}
+		replicas, result := plugin.Estimate(t.Context(), framework.ReplicaEstimationContext{
+			ReplicaRequirements: (&pb.ReplicaRequirements{Namespace: quota.Namespace, PriorityClassName: "included"}).
+				MustSetResourceRequest(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m")}),
+			AssumedWorkloads: assumed,
+		})
+		assert.Equal(t, int32(3), replicas)
+		assert.Equal(t, framework.Success, result.Code())
+		componentSets, result := plugin.EstimateComponents(t.Context(), framework.ComponentEstimationContext{
+			Namespace: quota.Namespace, Components: []*pb.Component{newComponent("included", "10m")},
+			AssumedWorkloads: assumed,
+		})
+		assert.Equal(t, int32(3), componentSets)
+		assert.Equal(t, framework.Success, result.Code())
+	})
+	t.Run("only fully matching components consume quota", func(t *testing.T) {
+		componentSets, result := plugin.EstimateComponents(t.Context(), framework.ComponentEstimationContext{
+			Namespace: quota.Namespace,
+			Components: []*pb.Component{
+				newComponent("included", "10m"), newComponent("excluded", "100m"),
+			},
+		})
+		assert.Equal(t, int32(3), componentSets)
+		assert.Equal(t, framework.Success, result.Code())
+	})
+}
+
 func TestResourceQuotaEstimatorPlugin(t *testing.T) {
 	tests := map[string]struct {
 		replicaRequirements *pb.ReplicaRequirements
@@ -404,7 +481,7 @@ func TestResourceQuotaEstimatorPlugin(t *testing.T) {
 				ret:     framework.NewResult(framework.Unschedulable, "zero replica is estimated by ResourceQuotaEstimator"),
 			},
 		},
-		"resource-quota-evaluate-all-with-multiple-selector-scopes": {
+		"mutually-exclusive-priority-expressions-do-not-apply": {
 			replicaRequirements: (&pb.ReplicaRequirements{
 				Namespace:         fooNamespace,
 				PriorityClassName: fooPriorityClassName,
@@ -418,8 +495,8 @@ func TestResourceQuotaEstimatorPlugin(t *testing.T) {
 			},
 			enabled: true,
 			expect: expect{
-				replica: 0,
-				ret:     framework.NewResult(framework.Unschedulable, "zero replica is estimated by ResourceQuotaEstimator"),
+				replica: math.MaxInt32,
+				ret:     framework.NewResult(framework.Success, "ResourceQuotaEstimator found no quota constraints"),
 			},
 		},
 		"request-resource-quota-evaluate-all": {

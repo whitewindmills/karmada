@@ -323,18 +323,19 @@ func (pl *resourceQuotaEstimator) deductAssumedResources(availableResources core
 	return availableResources, nil
 }
 
+// quotaAppliesToPriority uses the conjunction required by Kubernetes ScopeSelector.
 func quotaAppliesToPriority(selectors []corev1.ScopedResourceSelectorRequirement, priorityClassName string) bool {
 	for _, selector := range selectors {
 		matchScope, err := matchesScope(selector, priorityClassName)
 		if err != nil {
 			klog.Error(err, "matchesScope failed")
-			continue
+			return false
 		}
-		if matchScope {
-			return true
+		if !matchScope {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // aggregateComponentRequirements computes the total resource requirements for one complete
