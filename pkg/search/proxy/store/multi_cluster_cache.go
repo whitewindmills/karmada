@@ -380,6 +380,7 @@ func (c *MultiClusterCache) Watch(ctx context.Context, gvr schema.GroupVersionRe
 		}
 		w, err := cache.Watch(ctx, options)
 		if err != nil {
+			mux.Stop()
 			return nil, err
 		}
 

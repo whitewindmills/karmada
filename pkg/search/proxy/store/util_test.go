@@ -118,6 +118,23 @@ func Test_watchMux_StopBySource(t *testing.T) {
 	}
 }
 
+func Test_watchMux_StopBeforeStart(t *testing.T) {
+	m := newWatchMux()
+	sources := []*watch.RaceFreeFakeWatcher{watch.NewRaceFreeFake(), watch.NewRaceFreeFake()}
+	for _, source := range sources {
+		t.Cleanup(source.Stop)
+		m.AddSource(source, nil)
+	}
+
+	m.Stop()
+	m.Stop()
+	for _, source := range sources {
+		if !source.IsStopped() {
+			t.Error("Stop must release sources even when the multiplexer has not started")
+		}
+	}
+}
+
 type fakeWatcher struct {
 	result  chan watch.Event
 	done    chan struct{}

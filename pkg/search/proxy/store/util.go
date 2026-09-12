@@ -246,11 +246,14 @@ func (w *watchMux) Stop() {
 	case <-w.done:
 	default:
 		close(w.done)
+		// Setup can fail before Start launches the forwarding goroutines.
+		for _, source := range w.sources {
+			source.watcher.Stop()
+		}
 	}
 }
 
 func (w *watchMux) startWatchSource(source watch.Interface, decorator func(watch.Event)) {
-	defer source.Stop()
 	defer w.Stop()
 	for {
 		var copyEvent watch.Event
