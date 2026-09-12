@@ -126,8 +126,8 @@ var _ = ginkgo.Describe("Quota plugin Testing", func() {
 			})
 		})
 
-		// To ensure that the resource quota is created on the target cluster before creating the deployment.
-		framework.WaitResourceQuotaPresentOnCluster(targetCluster, rqNamespace, rqName)
+		// Quota existence alone does not mean its accounting is initialized.
+		framework.WaitResourceQuotaReadyOnCluster(targetCluster, rqNamespace, rqName)
 	})
 
 	ginkgo.It("Deployment should be successfully propagated to target cluster within resource quota limits", func() {
@@ -283,8 +283,8 @@ var _ = framework.SerialDescribe("[EstimatorAssumption] ResourceQuota plugin ass
 				framework.RemovePropagationPolicy(karmadaClient, quotaNamespace, pp.Name)
 			})
 
-			// Ensure the quota exists on member1 before creating any FlinkDeployments.
-			framework.WaitResourceQuotaPresentOnCluster(targetCluster, quotaNamespace, rqName)
+			// Ensure quota accounting is initialized before creating any FlinkDeployments.
+			framework.WaitResourceQuotaReadyOnCluster(targetCluster, quotaNamespace, rqName)
 		})
 	})
 

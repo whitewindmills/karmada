@@ -124,6 +124,7 @@ test: install_gotestsum
 	$(GOTEST) $(GO_TEST_FLAGS) ./cmd/... -coverprofile=./_output/coverage/coverage_cmd.txt
 	$(GOTEST) $(GO_TEST_FLAGS) ./examples/... -coverprofile=./_output/coverage/coverage_examples.txt
 	$(GOTEST) $(GO_TEST_FLAGS) ./operator/... -coverprofile=./_output/coverage/coverage_operator.txt
+	$(GOTEST) $(GO_TEST_FLAGS) ./test/e2e/framework -coverprofile=./_output/coverage/coverage_e2e_framework.txt
 
 upload-images: images
 	@echo "push images to $(REGISTRY)"

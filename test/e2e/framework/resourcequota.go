@@ -67,6 +67,36 @@ func WaitResourceQuotaPresentOnCluster(cluster, namespace, name string) {
 	}, PollTimeout, PollInterval).Should(gomega.Equal(true))
 }
 
+// WaitResourceQuotaReadyOnCluster waits until quota accounting reflects the requested limits.
+func WaitResourceQuotaReadyOnCluster(cluster, namespace, name string) {
+	clusterClient := GetClusterClient(cluster)
+	gomega.Expect(clusterClient).ShouldNot(gomega.BeNil())
+
+	klog.Infof("Waiting for resourceQuota(%s/%s) accounting to initialize on cluster(%s)", namespace, name, cluster)
+	gomega.Eventually(func(g gomega.Gomega) {
+		quota, err := clusterClient.CoreV1().ResourceQuotas(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+		g.Expect(err).ShouldNot(gomega.HaveOccurred())
+		g.Expect(resourceQuotaStatusReady(quota)).Should(gomega.BeTrue(),
+			"quota accounting is not ready: spec.hard=%v status=%v", quota.Spec.Hard, quota.Status)
+	}, PollTimeout, PollInterval).Should(gomega.Succeed())
+}
+
+func resourceQuotaStatusReady(quota *corev1.ResourceQuota) bool {
+	if len(quota.Status.Hard) != len(quota.Spec.Hard) {
+		return false
+	}
+	for name, limit := range quota.Spec.Hard {
+		observed, exists := quota.Status.Hard[name]
+		if !exists || !observed.Equal(limit) {
+			return false
+		}
+		if _, exists := quota.Status.Used[name]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
 // WaitResourceQuotaDisappearOnClusters wait resourceQuota disappear on clusters until timeout.
 func WaitResourceQuotaDisappearOnClusters(clusters []string, namespace, name string) {
 	ginkgo.By(fmt.Sprintf("Check if resourceQuota(%s/%s) disappear on member clusters", namespace, name), func() {

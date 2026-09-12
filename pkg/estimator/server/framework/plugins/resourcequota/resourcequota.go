@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/util/sets"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 
@@ -246,7 +247,7 @@ func (pl *resourceQuotaEstimator) evaluateComponentsAgainstQuota(rq *corev1.Reso
 
 	matchedAssumedComponents := filterComponentsBySelectors(assumedComponents, selectors)
 
-	availableResources := calculateFreeResources(rq, matchingResources(resourceNames(rq.Status.Hard)))
+	availableResources := calculateFreeResources(rq, matchingResources(resourceNames(rq.Spec.Hard, rq.Status.Hard)))
 	if len(availableResources) == 0 {
 		return noQuotaConstraint, nil
 	}
@@ -422,7 +423,7 @@ func (pl *resourceQuotaEstimator) evaluateReplicasAgainstQuota(
 	}
 
 	// If the quota applies, extract the free resources.
-	matchResource := matchingResources(resourceNames(rq.Status.Hard))
+	matchResource := matchingResources(resourceNames(rq.Spec.Hard, rq.Status.Hard))
 	if len(matchResource) == 0 {
 		return noQuotaConstraint, nil
 	}
@@ -534,9 +535,9 @@ func convertToResourceList(resourceRequirements map[corev1.ResourceName]int64) c
 
 // calculateFreeResources calculates the free resources from the input ResourceQuota.
 // It only calculates the free resources that are present in resourceNames.
+// A declared resource whose hard limit or usage is not yet known has zero available quota.
 func calculateFreeResources(rq *corev1.ResourceQuota, resourceNames []corev1.ResourceName) corev1.ResourceList {
-	hardResourceList := corev1.ResourceList{}
-	usedResourceList := corev1.ResourceList{}
+	freeResourceList := corev1.ResourceList{}
 	for _, resourceName := range resourceNames {
 		rNameStr := string(resourceName)
 		// skip limits because pb.ReplicaRequirements only supports requested resources
@@ -549,30 +550,32 @@ func calculateFreeResources(rq *corev1.ResourceQuota, resourceNames []corev1.Res
 		trimmedResourceName := corev1.ResourceName(strings.TrimPrefix(rNameStr, resourceRequestsPrefix))
 		hardResource, hardResourceOk := rq.Status.Hard[resourceName]
 		usedResource, usedResourceOk := rq.Status.Used[resourceName]
+		available := resource.Quantity{}
 		if !hardResourceOk || !usedResourceOk {
-			continue
+			klog.V(4).InfoS("ResourceQuota accounting is not initialized; treating resource as unavailable",
+				"namespace", rq.Namespace, "name", rq.Name, "resource", resourceName)
+		} else {
+			available = hardResource.DeepCopy()
+			available.Sub(usedResource)
 		}
-		hardResourceList[trimmedResourceName] = hardResource
-		usedResourceList[trimmedResourceName] = usedResource
-	}
 
-	freeResourceList := corev1.ResourceList{}
-	for resourceName, hard := range hardResourceList {
-		if used, ok := usedResourceList[resourceName]; ok {
-			hard.Sub(used)
-			freeResourceList[resourceName] = hard
+		// Every alias constrains the resource; known capacity must not mask an uninitialized alias.
+		if previous, exists := freeResourceList[trimmedResourceName]; !exists || available.Cmp(previous) < 0 {
+			freeResourceList[trimmedResourceName] = available
 		}
 	}
 	return freeResourceList
 }
 
-// resourceNames returns a list of all resource names in the ResourceList
-func resourceNames(resources corev1.ResourceList) []corev1.ResourceName {
-	result := []corev1.ResourceName{}
-	for resourceName := range resources {
-		result = append(result, resourceName)
+// resourceNames returns the union of names in the requested and enforced quota resources.
+func resourceNames(resourceLists ...corev1.ResourceList) []corev1.ResourceName {
+	result := sets.New[corev1.ResourceName]()
+	for _, resources := range resourceLists {
+		for resourceName := range resources {
+			result.Insert(resourceName)
+		}
 	}
-	return result
+	return sets.List(result)
 }
 
 func getScopeSelectorsFromQuota(quota *corev1.ResourceQuota) []corev1.ScopedResourceSelectorRequirement {

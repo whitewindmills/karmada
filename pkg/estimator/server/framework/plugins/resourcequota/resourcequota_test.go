@@ -31,6 +31,8 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 
 	"github.com/karmada-io/karmada/pkg/estimator/pb"
 	"github.com/karmada-io/karmada/pkg/estimator/server/framework"
@@ -217,6 +219,85 @@ func setup(t *testing.T, resourceQuotaList []*corev1.ResourceQuota, enablePlugin
 		}
 	}
 	return tc
+}
+
+func TestQuotaInitializationDoesNotMeanUnlimitedCapacity(t *testing.T) {
+	hard := corev1.ResourceList{corev1.ResourceRequestsCPU: resource.MustParse("30m")}
+	used := corev1.ResourceList{corev1.ResourceRequestsCPU: resource.MustParse("0")}
+	request := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m")}
+	for _, tt := range []struct {
+		name            string
+		status          corev1.ResourceQuotaStatus
+		additionalAlias bool
+	}{
+		{name: "status absent"},
+		{name: "usage absent", status: corev1.ResourceQuotaStatus{Hard: hard}},
+		{name: "hard limit absent", status: corev1.ResourceQuotaStatus{Used: used}},
+		{name: "new resource missing from status", status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+			Used: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("0")},
+		}},
+		{name: "known requests alias cannot mask unknown cpu", additionalAlias: true,
+			status: corev1.ResourceQuotaStatus{Hard: hard, Used: used}},
+		{name: "known cpu cannot mask unknown requests alias", additionalAlias: true, status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("30m")},
+			Used: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0")},
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			quota := &corev1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: "test"},
+				Spec:       corev1.ResourceQuotaSpec{Hard: hard.DeepCopy()},
+				Status:     tt.status,
+			}
+			if tt.additionalAlias {
+				quota.Spec.Hard[corev1.ResourceCPU] = resource.MustParse("30m")
+			}
+			original := quota.DeepCopy()
+			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+			require.NoError(t, indexer.Add(quota))
+			plugin := &resourceQuotaEstimator{enabled: true, rqLister: corelisters.NewResourceQuotaLister(indexer)}
+			replicaContext := framework.ReplicaEstimationContext{
+				ReplicaRequirements: (&pb.ReplicaRequirements{Namespace: quota.Namespace}).MustSetResourceRequest(request),
+			}
+			componentContext := framework.ComponentEstimationContext{
+				Namespace: quota.Namespace,
+				Components: []*pb.Component{{
+					Name: "app", Replicas: 1,
+					ReplicaRequirements: (&pb.ComponentReplicaRequirements{}).MustSetResourceRequest(request),
+				}},
+			}
+			replicas, result := plugin.Estimate(t.Context(), replicaContext)
+			assert.Equal(t, int32(0), replicas)
+			assert.Equal(t, framework.Unschedulable, result.Code())
+			componentSets, result := plugin.EstimateComponents(t.Context(), componentContext)
+			assert.Equal(t, int32(0), componentSets)
+			assert.Equal(t, framework.Unschedulable, result.Code())
+			assert.Equal(t, original, quota, "estimation must not mutate cached quota state")
+
+			initialized := quota.DeepCopy()
+			initialized.Status = corev1.ResourceQuotaStatus{Hard: quota.Spec.Hard.DeepCopy(), Used: used.DeepCopy()}
+			if tt.additionalAlias {
+				initialized.Status.Used[corev1.ResourceCPU] = resource.MustParse("0")
+			}
+			require.NoError(t, indexer.Update(initialized))
+			replicas, result = plugin.Estimate(t.Context(), replicaContext)
+			assert.Equal(t, int32(3), replicas)
+			assert.Equal(t, framework.Success, result.Code())
+			componentSets, result = plugin.EstimateComponents(t.Context(), componentContext)
+			assert.Equal(t, int32(3), componentSets)
+			assert.Equal(t, framework.Success, result.Code())
+			if tt.additionalAlias {
+				stricter := initialized.DeepCopy()
+				stricter.Status.Hard[corev1.ResourceCPU] = resource.MustParse("20m")
+				require.NoError(t, indexer.Update(stricter))
+				replicas, _ = plugin.Estimate(t.Context(), replicaContext)
+				componentSets, _ = plugin.EstimateComponents(t.Context(), componentContext)
+				assert.Equal(t, int32(2), replicas, "every enforced alias must constrain capacity")
+				assert.Equal(t, int32(2), componentSets)
+			}
+		})
+	}
 }
 
 func TestResourceQuotaEstimatorPlugin(t *testing.T) {
